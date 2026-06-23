@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sccg-mcp"
-version = "0.1.0"
-description = "Sisyphus + Claude + Coder + Codex + Gemini 多模型协作 MCP 服务器"
+name = "codex-mcp-cyber"
+version = "0.2.0"
+description = "Claude + Codex 代码审查 MCP 服务器"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,10 +13,10 @@ dependencies = [
     "pydantic>=2.0",
 ]
 authors = [
-    { name = "SCCG-MCP Contributors" },
+    { name = "codex-mcp-cyber Contributors" },
 ]
 license = { text = "MIT" }
-keywords = ["mcp", "fastmcp", "sisyphus", "coder", "codex", "gemini", "claude"]
+keywords = ["mcp", "fastmcp", "codex", "claude", "code-review"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -25,13 +25,13 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ZeroStarlet/Sisyphus-Coder-Codex-Gemini"
+Homepage = "https://github.com/ZeroStarlet/codex-mcp-cyber"
 
 [project.scripts]
-sccg-mcp = "sccg_mcp.cli:main"
+codex-mcp-cyber = "codex_mcp_cyber.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sccg_mcp"]
+packages = ["src/codex_mcp_cyber"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/sccg_mcp", "README.md", "LICENSE"]
+include = ["src/codex_mcp_cyber", "README.md", "LICENSE"]

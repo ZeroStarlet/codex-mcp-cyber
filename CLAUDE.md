@@ -1,135 +1,136 @@
-# Sisyphus-Coder-Codex-Gemini (SCCG)
+# codex-mcp-cyber
 
-> Claude + Coder + Codex + Gemini 多模型协作 MCP 服务器
+> Claude + Codex 代码审查 MCP 服务器
 
 ## 项目定位
 
-一个统一的 MCP 服务器，让 Claude (Opus) 作为架构师调度 Coder 执行代码任务、Codex 审核代码质量、Gemini 提供专家咨询，形成自动化的多方协作闭环。
+一个精简的 MCP 服务器——Claude 写代码，Codex 独立审核 + 复审。砍掉了 Coder 和 Gemini，只保留核心审查能力。
 
-## 核心价值
-
-| 维度 | 价值 |
-|------|------|
-| **成本优化** | Opus 负责思考（贵但强），Coder 负责执行（量大管饱） |
-| **能力互补** | Opus 补足 Coder 创造力短板，Codex 提供独立审核视角，Gemini 提供多元化专家意见 |
-| **质量保障** | 双重审核机制（Claude 初审 + Codex 终审） |
-| **全自动闭环** | 拆解 → 执行 → 审核 → 重试，无需人工干预 |
-
-## 角色分工
+## 架构
 
 ```
-Claude (Opus)     →  架构师 + 初审官 + 终审官 + 协调者
-Coder (可配置)    →  代码执行者（生成、修改、批量任务）
-Codex (OpenAI)    →  独立代码审核者（质量把关）
-Gemini (可选)     →  多面手专家（架构设计、第二意见、前端/UI）
+Claude (Opus)  →  写代码、拆任务、做决策
+Codex (OpenAI) →  独立审核 + 复审（read-only，唯一审核者）
 ```
+
+- Claude 自己写代码，不再委托子代理执行
+- Codex 是唯一审核者：初次审核和修复后复审全由 Codex 完成。Claude 不做初审
+- 审查 → 修复 → 复审 → 循环至所有问题关闭
 
 ## 项目结构
 
 ```
-Sisyphus-Coder-Codex-Gemini/
-├── src/sccg_mcp/              # 源代码
+codex-mcp-cyber/
+├── src/codex_mcp_cyber/       # 源代码
 │   ├── __init__.py
-│   ├── cli.py                # 入口点
-│   ├── server.py             # MCP 服务器主体
-│   ├── config.py             # 配置加载
+│   ├── cli.py                 # 入口点
+│   ├── server.py              # MCP 服务器主体
 │   └── tools/
-│       ├── coder.py          # Coder 工具
-│       ├── codex.py          # Codex 工具
-│       └── gemini.py         # Gemini 工具
-├── skills/                   # Skills 工作流指导
-│   ├── sccg-workflow/         # SCCG 协作流程
-│   └── gemini-collaboration/ # Gemini 协作指南
-├── templates/                # 模板文件
-│   └── sccg-global-prompt.md  # 全局 CLAUDE.md 模板
-├── cases/                    # 实测案例
+│       ├── __init__.py
+│       └── codex.py           # Codex 工具
+├── skills/                    # Skills 工作流指导
+│   └── cc-review/             # Claude + Codex 审查协作流程
 ├── pyproject.toml
-├── config.example.toml       # 配置文件示例
-├── setup.sh                  # Unix/macOS 安装脚本
-├── setup.ps1                 # Windows PowerShell 安装脚本
-├── setup.bat                 # Windows 批处理入口
-├── README.md                 # 项目说明（中文）
-├── README_EN.md              # 项目说明（英文）
-└── CLAUDE.md                 # 本文件
+├── setup.sh                   # Unix/macOS 安装脚本
+├── setup.ps1                  # Windows PowerShell 安装脚本
+├── setup.bat                  # Windows 批处理入口
+├── README.md                  # 项目说明（中文）
+├── README_EN.md               # 项目说明（英文）
+└── CLAUDE.md                  # 本文件
 ```
 
-## 开发里程碑
+## MCP 工具
 
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| M0 | 方案设计、技术验证 | ✅ 完成 |
-| M1 | 最小可用版本（coder 工具） | ✅ 完成 |
-| M2 | 集成 codex 工具 | ✅ 完成 |
-| M3 | 协作 Prompt 优化 | ✅ 完成 |
-| M4 | 集成 gemini 工具 | ✅ 完成 |
-| M5 | 文档、发布 | ✅ 完成 |
+### codex
 
-## 技术要点
+调用 Codex CLI 进行代码审核。默认 `sandbox="read-only"`。
 
-### MCP 工具
+**参数：**
 
-- `coder`: 调用可配置后端模型执行代码生成/修改，默认 `workspace-write`
-- `codex`: 调用 Codex 进行代码审核，默认 `read-only`
-- `gemini`: 调用 Gemini CLI 进行专家咨询或代码执行，默认 `workspace-write`
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| PROMPT | string | ✅ | - | 审核任务描述，建议包含 git diff |
+| cd | Path | ✅ | - | 工作目录 |
+| sandbox | string | - | `read-only` | 必须 read-only |
+| SESSION_ID | string | - | `""` | 会话复用 |
+| skip_git_repo_check | bool | - | `true` | 允许非 Git 仓库 |
+| timeout | int | - | `300` | 空闲超时秒数 |
+| max_duration | int | - | `1800` | 总时长上限秒数 |
+| max_retries | int | - | `1` | 最大重试次数 |
+| model | string | - | `""` | 指定模型 |
+| return_all_messages | bool | - | `false` | 返回完整消息 |
+| return_metrics | bool | - | `false` | 返回指标数据 |
+| image | List[Path] | - | `null` | 附加图片 |
+| yolo | bool | - | `false` | 跳过沙箱审批（慎用） |
+| profile | string | - | `""` | 配置文件名称 |
+| log_metrics | bool | - | `false` | 输出指标到 stderr |
 
-### 核心特性
+**返回值：**
 
-#### 结构化错误
-失败时返回 `error_kind` 和 `error_detail`，便于上层决策是否重试：
 ```json
+// 成功
+{
+  "success": true,
+  "tool": "codex",
+  "SESSION_ID": "uuid-string",
+  "result": "审核结论"
+}
+
+// 失败
 {
   "success": false,
   "error": "错误摘要",
-  "error_kind": "timeout | upstream_error | ...",
-  "error_detail": {
-    "message": "错误简述",
-    "exit_code": 1,
-    "last_lines": ["最后20行输出..."],
-    "retries": 0
-  }
+  "error_kind": "timeout | command_not_found | upstream_error | ...",
+  "error_detail": { ... }
 }
 ```
 
-#### 重试策略
-- **Codex**：默认允许 1 次重试（只读操作无副作用）
-- **Coder**：默认不重试（有写入副作用），可通过 `max_retries` 显式启用
-- **Gemini**：默认允许 1 次重试
+### 重试策略
 
-#### 可观察性指标
-- `return_metrics=True`：在返回值中包含耗时、Prompt 长度等指标
-- `log_metrics=True`：将指标输出到 stderr（JSONL 格式）
+- Codex 默认 1 次重试（只读操作无副作用）
+- `command_not_found` 不重试（需用户安装 codex CLI）
 
-#### 命令行参数策略
-- **设置源**：`--setting-sources "project"` 仅加载项目级设置
-- **System Prompt**：`--append-system-prompt` 通过命令行参数追加角色指令
-- **对话 Prompt**：通过 stdin 传递（支持换行符，无长度限制）
+## 协作流程
 
-### 配置方案
+1. Claude 分析需求，执行代码改动
+2. 改动完成后，Claude 获取 `git diff --no-color`
+3. Claude 调用 codex 工具，将 diff 嵌入 PROMPT
+4. Codex 独立审核，返回 ✅ / ⚠️ / ❌
+5. ❌ / ⚠️ → Claude 修复 → Codex 复审 → 循环直到 ✅
+6. ✅ → 合入 / 提交
 
-优先级：`~/.sccg-mcp/config.toml` > 环境变量
+详见 `skills/cc-review/SKILL.md`。
 
-```toml
-# ~/.sccg-mcp/config.toml
-[coder]
-api_token = "your-api-token"  # 可配置任意支持 Claude Code API 的模型后端
-base_url = "https://open.bigmodel.cn/api/anthropic"  # 示例：GLM API
-model = "glm-4.7"  # 示例：GLM-4.7，可替换为其他模型
+## 安装
+
+```bash
+# Unix/macOS
+chmod +x setup.sh && ./setup.sh
+
+# Windows
+.\setup.bat
 ```
 
-### 跨平台实现
+## 开发
 
-通过 `subprocess.Popen(env=custom_env)` 注入环境变量，无需依赖脚本文件。
+```bash
+# 克隆仓库
+git clone https://github.com/ZeroStarlet/codex-mcp-cyber.git
+cd codex-mcp-cyber
+
+# 安装依赖
+uv sync
+
+# 本地调试
+uv run codex-mcp-cyber
+```
 
 ## 参考资源
 
-- [CodexMCP](https://github.com/GuDaStudio/codexmcp) - 核心参考实现
-- [FastMCP](https://github.com/jlowin/fastmcp) - MCP 框架
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
-- [Codex CLI](https://developers.openai.com/codex/quickstart)
-- [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- **Claude Code**: [Documentation](https://docs.anthropic.com/en/docs/claude-code)
+- **Codex CLI**: [Documentation](https://developers.openai.com/codex/quickstart)
+- **FastMCP**: [GitHub](https://github.com/jlowin/fastmcp) - MCP 框架
 
 ---
 
-> 📅 项目创建: 2026-01-01
-> 📅 重命名为 CCG（Coder-Codex-Gemini）: 2026-01-03
-> 📅 重命名为 SCCG（Sisyphus-Coder-Codex-Gemini）: 2026-05-13
+> 从 SCCG (Sisyphus-Coder-Codex-Gemini) 重构而来 · 2026-06-23
