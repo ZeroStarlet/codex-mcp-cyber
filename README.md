@@ -198,6 +198,3 @@ uv run codex-mcp-cyber
 MIT
 
 ---
-
-> 从 SCCG (Sisyphus-Coder-Codex-Gemini) 重构而来 · 2026-06-23
-> 砍掉了 Coder 和 Gemini，聚焦 Claude + Codex 审查协作

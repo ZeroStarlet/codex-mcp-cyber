@@ -198,6 +198,3 @@ uv run codex-mcp-cyber
 MIT
 
 ---
-
-> Refactored from SCCG (Sisyphus-Coder-Codex-Gemini) · 2026-06-23
-> Removed Coder and Gemini, focused on Claude + Codex review collaboration

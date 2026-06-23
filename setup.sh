@@ -53,8 +53,7 @@ success "Project dependencies installed"
 # ======================================================================
 step "Step 3: Registering MCP server..."
 
-# Clean up old registrations from prior SCCG or stale installs
-claude mcp remove sccg --scope user 2>/dev/null || true
+# Clean up old registrations
 claude mcp remove codex-mcp-cyber --scope user 2>/dev/null || true
 
 echo ""

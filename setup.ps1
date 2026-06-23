@@ -202,7 +202,6 @@ if ($DryRun) {
 Write-Step "Step 3: Registering MCP server..."
 
 if ($DryRun) {
-    Write-DryRun "Would run: claude mcp remove sccg --scope user"
     Write-DryRun "Would run: claude mcp remove codex-mcp-cyber --scope user"
 
     Write-Host ""
@@ -228,11 +227,6 @@ if ($DryRun) {
     }
 
     try {
-        # Clean up old SCCG registration for upgrading users
-        $sccgRemoveResult = Invoke-Claude -Arguments @("mcp","remove","sccg","--scope","user") -TimeoutSec 15
-        if ($sccgRemoveResult.ExitCode -eq 0) {
-            Write-WarningMsg "Removed legacy sccg MCP server (upgrade cleanup)"
-        }
 
         $removeResult = Invoke-Claude -Arguments @("mcp","remove","codex-mcp-cyber","--scope","user") -TimeoutSec 15
         if ($removeResult.TimedOut) {
