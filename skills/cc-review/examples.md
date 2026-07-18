@@ -3,6 +3,8 @@
 > 统一前提：**代码全部由 Claude 自己写并自测**，Codex 只做独立终审（read-only，只审不改）。
 >
 > **发送前校验**：所有 `[方括号占位符]` 和 `<尖括号占位符>` 必须替换为实际内容再发送。切勿将字面占位符文本发送给 Codex。
+>
+> **`cd` 不要加引号**：传裸路径，如 `C:/Users/you/repo` 或 `/project`；不要传 `"C:/Users/you/repo"`。Windows 上字面引号会触发 `os error 123`（`invalid_path`）。
 
 ---
 
