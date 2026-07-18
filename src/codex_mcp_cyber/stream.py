@@ -27,6 +27,15 @@ class StreamOutcome:
     all_messages: list[dict[str, Any]] = field(default_factory=list)
 
 
+def is_turn_completed_line(line: str) -> bool:
+    """行流 early-stop 默认谓词：事件 type == turn.completed。"""
+    try:
+        data = json.loads(line)
+        return isinstance(data, dict) and data.get("type") == "turn.completed"
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return False
+
+
 def reduce_codex_stream(
     lines: list[str],
     *,

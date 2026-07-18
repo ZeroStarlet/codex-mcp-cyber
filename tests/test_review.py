@@ -677,3 +677,144 @@ async def test_failure_error_detail_redacts_tool_result_last_lines(
     joined = "\n".join(str(x) for x in last)
     assert secret not in joined
     assert any("[truncated]" in str(x) for x in last)
+
+
+def test_is_turn_completed_line_predicate() -> None:
+    from codex_mcp_cyber.stream import is_turn_completed_line
+
+    assert is_turn_completed_line(json.dumps({"type": "turn.completed"})) is True
+    assert is_turn_completed_line(json.dumps({"type": "turn.started"})) is False
+    assert is_turn_completed_line("not-json") is False
+    assert is_turn_completed_line(json.dumps(["turn.completed"])) is False
+    assert is_turn_completed_line(json.dumps({"type": None})) is False
+
+
+class _FakeStdout:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = list(lines)
+        self._i = 0
+        self.closed = False
+
+    def readline(self) -> str:
+        if self._i >= len(self._lines):
+            return ""
+        value = self._lines[self._i]
+        self._i += 1
+        return value + "\n"
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeProcess:
+    def __init__(self, lines: list[str]) -> None:
+        self.stdout = _FakeStdout(lines)
+        self.stdin = None
+        self._alive = True
+
+    def poll(self) -> int | None:
+        return None if self._alive else 0
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        self._alive = False
+        return 0
+
+    def terminate(self) -> None:
+        self._alive = False
+
+    def kill(self) -> None:
+        self._alive = False
+
+
+def _run_popen_with_fake_lines(
+    lines: list[str],
+    *,
+    is_terminal_line=None,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    from codex_mcp_cyber.process import PopenCodexRunner
+    import codex_mcp_cyber.process as process_mod
+
+    monkeypatch.setattr(process_mod.shutil, "which", lambda _name: "codex-fake")
+    monkeypatch.setattr(
+        process_mod.subprocess,
+        "Popen",
+        lambda *a, **k: _FakeProcess(lines),  # noqa: ARG005
+    )
+    # early-stop grace 在测试中压到 0，避免 0.3s 睡眠拖慢
+    real_sleep = process_mod.time.sleep
+
+    def _fast_sleep(sec: float) -> None:
+        if sec == 0.3:
+            return
+        real_sleep(sec)
+
+    monkeypatch.setattr(process_mod.time, "sleep", _fast_sleep)
+    runner = PopenCodexRunner(is_terminal_line=is_terminal_line)
+    outcome = runner.run(
+        ["codex", "exec"],
+        prompt="hi",
+        timeout=30,
+        max_duration=60,
+    )
+    return outcome.lines
+
+
+def test_popen_default_stops_after_turn_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from codex_mcp_cyber.stream import is_turn_completed_line
+
+    lines = [
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "turn.completed"}),
+        json.dumps({"type": "after-should-not-read"}),
+    ]
+    got = _run_popen_with_fake_lines(lines, monkeypatch=monkeypatch)
+    assert json.dumps({"type": "turn.completed"}) in got
+    assert all("after-should-not-read" not in x for x in got)
+    # 默认路径确实用 stream 谓词语义
+    assert is_turn_completed_line(json.dumps({"type": "turn.completed"}))
+
+
+def test_popen_custom_predicate_is_invoked_and_can_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def never_stop(line: str) -> bool:
+        seen.append(line)
+        return False
+
+    lines = ["a", "b", "c"]
+    got = _run_popen_with_fake_lines(
+        lines, is_terminal_line=never_stop, monkeypatch=monkeypatch
+    )
+    assert got == ["a", "b", "c"]
+    assert seen == ["a", "b", "c"]
+
+
+def test_popen_predicate_exception_is_not_silent_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(line: str) -> bool:
+        if line == "plain-log":
+            raise ValueError("bad predicate")
+        return False
+
+    with pytest.raises(ValueError, match="bad predicate"):
+        _run_popen_with_fake_lines(
+            ["plain-log", "after"],
+            is_terminal_line=boom,
+            monkeypatch=monkeypatch,
+        )
+
+
+def test_popen_runner_accepts_custom_terminal_predicate() -> None:
+    from codex_mcp_cyber.process import PopenCodexRunner
+
+    def always_false(_line: str) -> bool:
+        return False
+
+    runner = PopenCodexRunner(is_terminal_line=always_false)
+    assert runner.is_terminal_line is always_false

@@ -9,7 +9,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Generator, Iterator, Optional, Protocol
+from typing import Callable, Generator, Iterator, Optional, Protocol
 
 from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError
 
@@ -84,24 +84,20 @@ class SequenceRunner:
         return step
 
 
-def _is_turn_completed(line: str) -> bool:
-    import json
-
-    try:
-        data = json.loads(line)
-        return data.get("type") == "turn.completed"
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        return False
-
-
 @contextmanager
 def safe_codex_command(
     cmd: list[str],
     timeout: int = 300,
     max_duration: int = 1800,
     prompt: str = "",
+    is_terminal_line: Callable[[str], bool] | None = None,
 ) -> Iterator[Generator[str, None, tuple[Optional[int], int]]]:
     """安全执行 Codex 命令的上下文管理器（生产实现细节）。"""
+    if is_terminal_line is None:
+        from codex_mcp_cyber.stream import is_turn_completed_line
+
+        is_terminal_line = is_turn_completed_line
+
     codex_path = shutil.which("codex")
     if not codex_path:
         raise CommandNotFoundError(
@@ -160,7 +156,7 @@ def safe_codex_command(
                 except (BrokenPipeError, OSError):
                     pass
 
-        output_queue: queue.Queue[str | None] = queue.Queue()
+        output_queue: queue.Queue[str | BaseException | None] = queue.Queue()
         raw_output_lines_holder = [0]
         GRACEFUL_SHUTDOWN_DELAY = 0.3
 
@@ -172,7 +168,13 @@ def safe_codex_command(
                         output_queue.put(stripped)
                         if stripped:
                             raw_output_lines_holder[0] += 1
-                        if _is_turn_completed(stripped):
+                        # 谓词异常不得被 I/O catch 吞掉（静默截断且可能 success）
+                        try:
+                            terminal = is_terminal_line(stripped)
+                        except Exception as pred_err:  # noqa: BLE001 — 透传给消费端
+                            output_queue.put(pred_err)
+                            break
+                        if terminal:
                             time.sleep(GRACEFUL_SHUTDOWN_DELAY)
                             break
                     process.stdout.close()
@@ -189,6 +191,7 @@ def safe_codex_command(
             start_time = time.time()
             last_activity_time = time.time()
             timeout_error: CommandTimeoutError | None = None
+            predicate_error: BaseException | None = None
 
             while True:
                 now = time.time()
@@ -205,15 +208,22 @@ def safe_codex_command(
                     )
                     break
                 try:
-                    line = output_queue.get(timeout=0.5)
-                    if line is None:
+                    item = output_queue.get(timeout=0.5)
+                    if item is None:
+                        break
+                    if isinstance(item, BaseException):
+                        predicate_error = item
                         break
                     last_activity_time = time.time()
-                    if line:
-                        yield line
+                    if item:
+                        yield item
                 except queue.Empty:
                     if process.poll() is not None and not thread.is_alive():
                         break
+
+            if predicate_error is not None:
+                cleanup()
+                raise predicate_error
 
             if timeout_error is not None:
                 cleanup()
@@ -242,9 +252,13 @@ def safe_codex_command(
 
             while not output_queue.empty():
                 try:
-                    line = output_queue.get_nowait()
-                    if line is not None:
-                        yield line
+                    item = output_queue.get_nowait()
+                    if item is None:
+                        continue
+                    if isinstance(item, BaseException):
+                        raise item
+                    if item:
+                        yield item
                 except queue.Empty:
                     break
 
@@ -262,6 +276,12 @@ def safe_codex_command(
 class PopenCodexRunner:
     """生产 adapter：真实 subprocess + 超时。"""
 
+    def __init__(
+        self,
+        is_terminal_line: Callable[[str], bool] | None = None,
+    ) -> None:
+        self.is_terminal_line = is_terminal_line
+
     def run(
         self,
         cmd: list[str],
@@ -275,7 +295,11 @@ class PopenCodexRunner:
         raw_output_lines = 0
         try:
             with safe_codex_command(
-                cmd, timeout=timeout, max_duration=max_duration, prompt=prompt
+                cmd,
+                timeout=timeout,
+                max_duration=max_duration,
+                prompt=prompt,
+                is_terminal_line=self.is_terminal_line,
             ) as gen:
                 it = iter(gen)
                 while True:
