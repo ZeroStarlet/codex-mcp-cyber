@@ -36,7 +36,9 @@ ENV/
 Thumbs.db
 
 # Project specific
-docs/
+docs/*
+!docs/adr/
+!docs/adr/**
 reference/
 
 # Secrets
