@@ -23,7 +23,7 @@ from codex_mcp_cyber.errors import (  # noqa: F401 — 兼容 re-export
     normalize_workdir as _normalize_workdir,
 )
 from codex_mcp_cyber.process import safe_codex_command  # noqa: F401
-from codex_mcp_cyber.review import ReviewRequest, run_review
+from codex_mcp_cyber.review import ReviewRequest, run_review, to_wire
 
 
 async def codex_tool(
@@ -85,4 +85,4 @@ async def codex_tool(
         max_retries=max_retries,
         log_metrics=log_metrics,
     )
-    return await run_review(req)
+    return to_wire(await run_review(req))

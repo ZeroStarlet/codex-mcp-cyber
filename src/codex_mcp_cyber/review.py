@@ -1,4 +1,4 @@
-"""深 module：审核执行 — run_review(ReviewRequest) → wire dict。"""
+"""深 module：审核执行 — run_review(ReviewRequest) → ReviewResult；to_wire 映射冻结 wire。"""
 
 from __future__ import annotations
 
@@ -39,6 +39,22 @@ class ReviewRequest:
     max_duration: int = 1800
     max_retries: int = 1
     log_metrics: bool = False
+
+
+@dataclass
+class ReviewResult:
+    """一次审核执行的领域结局（非 wire dict）。"""
+
+    success: bool
+    text: str = ""
+    session_id: Optional[str] = None
+    error_kind: Optional[str] = None
+    error_message: str = ""
+    error_detail: Optional[Dict[str, Any]] = None
+    duration_ms: int = 0
+    workdir: Optional[Path] = None
+    metrics: Optional[Dict[str, Any]] = None
+    all_messages: Optional[list[dict[str, Any]]] = None
 
 
 @dataclass
@@ -106,10 +122,7 @@ class MetricsCollector:
         }
 
     def format_duration(self) -> str:
-        total_seconds = self.duration_ms // 1000
-        minutes = total_seconds // 60
-        seconds = total_seconds % 60
-        return f"{minutes}m{seconds}s"
+        return format_duration_ms(self.duration_ms)
 
     def log_to_stderr(self) -> None:
         metrics = {k: v for k, v in self.to_dict().items() if v is not None}
@@ -117,6 +130,65 @@ class MetricsCollector:
             print(json.dumps(metrics, ensure_ascii=False), file=sys.stderr)
         except Exception:
             pass
+
+
+def format_duration_ms(duration_ms: int) -> str:
+    total_seconds = duration_ms // 1000
+    minutes = total_seconds // 60
+    seconds = total_seconds % 60
+    return f"{minutes}m{seconds}s"
+
+
+def _display_error(result: ReviewResult) -> str:
+    """wire 用人类可读错误文案；领域结局只保留 error_message。"""
+    raw = result.error_message or ""
+    if result.error_kind == ErrorKind.AUTH_REQUIRED:
+        return (
+            "请先登录 Codex CLI。运行以下命令完成认证：\n"
+            "  codex login\n"
+            "\n"
+            "或使用 API Key 认证：\n"
+            "  printenv OPENAI_API_KEY | codex login --with-api-key\n"
+            "\n" + raw
+        )
+    if result.error_kind == ErrorKind.INVALID_PATH:
+        path_line = f"已归一化路径：{result.workdir}\n" if result.workdir is not None else ""
+        return (
+            "工作目录路径非法（Windows 常见：cd 参数被包了字面引号，触发 os error 123）。\n"
+            f"{path_line}"
+            "正确写法：cd=C:/Users/you/project  或  cd=C:\\\\Users\\\\you\\\\project\n"
+            '错误写法：cd="C:/Users/you/project"  （引号会成为路径的一部分）\n'
+            "\n" + raw
+        )
+    return raw
+
+
+def to_wire(result: ReviewResult) -> Dict[str, Any]:
+    """ReviewResult → 冻结 MCP wire dict。"""
+    duration = format_duration_ms(result.duration_ms)
+    if result.success:
+        out: Dict[str, Any] = {
+            "success": True,
+            "tool": "codex",
+            "SESSION_ID": result.session_id,
+            "result": result.text,
+            "duration": duration,
+        }
+    else:
+        out = {
+            "success": False,
+            "tool": "codex",
+            "error": _display_error(result),
+            "error_kind": result.error_kind,
+            "error_detail": result.error_detail
+            or build_error_detail(result.error_message or "未知错误"),
+            "duration": duration,
+        }
+    if result.all_messages is not None:
+        out["all_messages"] = result.all_messages
+    if result.metrics is not None:
+        out["metrics"] = result.metrics
+    return out
 
 
 def _build_cmd(req: ReviewRequest, cd_path: Path) -> list[str]:
@@ -141,37 +213,21 @@ def _build_cmd(req: ReviewRequest, cd_path: Path) -> list[str]:
     return cmd
 
 
-def _wire_error(
-    *,
-    error: str,
-    error_kind: Optional[str],
-    error_detail: Dict[str, Any],
-    duration: str,
-    metrics: MetricsCollector,
-    return_metrics: bool,
-    all_messages: Optional[list] = None,
-    return_all_messages: bool = False,
-) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "success": False,
-        "tool": "codex",
-        "error": error,
-        "error_kind": error_kind,
-        "error_detail": error_detail,
-        "duration": duration,
-    }
-    if return_all_messages and all_messages is not None:
-        result["all_messages"] = all_messages
-    if return_metrics:
-        result["metrics"] = metrics.to_dict()
-    return result
+def _maybe_metrics(req: ReviewRequest, metrics: MetricsCollector) -> Optional[Dict[str, Any]]:
+    return metrics.to_dict() if req.return_metrics else None
+
+
+def _maybe_messages(
+    req: ReviewRequest, all_messages: list[dict[str, Any]]
+) -> Optional[list[dict[str, Any]]]:
+    return all_messages if req.return_all_messages else None
 
 
 async def run_review(
     req: ReviewRequest,
     runner: CodexProcessRunner | None = None,
-) -> Dict[str, Any]:
-    """执行审核。返回 wire 兼容 dict（冻结契约）。"""
+) -> ReviewResult:
+    """执行审核。返回领域结局 ReviewResult（wire 由 to_wire 映射）。"""
     metrics = MetricsCollector(tool="codex", prompt=req.prompt, sandbox=req.sandbox)
     active_runner: CodexProcessRunner = runner or PopenCodexRunner()
 
@@ -179,20 +235,19 @@ async def run_review(
     if not cd_path.exists():
         msg = (
             f"工作目录不存在或路径非法：{cd_path}\n"
-            f"（原始输入：{req.cd!r}）\n"
-            "提示：cd 参数不要加引号，传 C:/path/to/repo 或 C:\\\\path\\\\to\\\\repo，"
-            '不要传 "C:/path/to/repo"。'
+            f"（原始输入：{req.cd!r}）"
         )
         metrics.finish(success=False, error_kind=ErrorKind.INVALID_PATH, retries=0)
         if req.log_metrics:
             metrics.log_to_stderr()
-        return _wire_error(
-            error=msg,
+        return ReviewResult(
+            success=False,
             error_kind=ErrorKind.INVALID_PATH,
+            error_message=msg,
             error_detail=build_error_detail(msg),
-            duration=metrics.format_duration(),
-            metrics=metrics,
-            return_metrics=req.return_metrics,
+            duration_ms=metrics.duration_ms,
+            workdir=cd_path,
+            metrics=_maybe_metrics(req, metrics),
         )
 
     cmd = _build_cmd(req, cd_path)
@@ -237,16 +292,15 @@ async def run_review(
             )
             if req.log_metrics:
                 metrics.log_to_stderr()
-            result = {
-                "success": False,
-                "tool": "codex",
-                "error": str(e),
-                "error_kind": ErrorKind.COMMAND_NOT_FOUND,
-                "error_detail": build_error_detail(str(e)),
-            }
-            if req.return_metrics:
-                result["metrics"] = metrics.to_dict()
-            return result
+            return ReviewResult(
+                success=False,
+                error_kind=ErrorKind.COMMAND_NOT_FOUND,
+                error_message=str(e),
+                error_detail=build_error_detail(str(e)),
+                duration_ms=metrics.duration_ms,
+                workdir=cd_path,
+                metrics=_maybe_metrics(req, metrics),
+            )
         except CommandTimeoutError as e:
             error_kind = ErrorKind.IDLE_TIMEOUT if e.is_idle else ErrorKind.TIMEOUT
             err_message = str(e)
@@ -348,58 +402,38 @@ async def run_review(
         metrics.log_to_stderr()
 
     if success:
-        result = {
-            "success": True,
-            "tool": "codex",
-            "SESSION_ID": thread_id,
-            "result": agent_messages,
-            "duration": metrics.format_duration(),
-        }
-    else:
-        if last_error:
-            error_kind = last_error["error_kind"]
-            err_message = last_error["err_message"]
-            exit_code = last_error["exit_code"]
-            json_decode_errors = last_error["json_decode_errors"]
+        return ReviewResult(
+            success=True,
+            text=agent_messages,
+            session_id=thread_id,
+            duration_ms=metrics.duration_ms,
+            workdir=cd_path,
+            metrics=_maybe_metrics(req, metrics),
+            all_messages=_maybe_messages(req, all_messages),
+        )
 
-        final_error = err_message
-        if error_kind == ErrorKind.AUTH_REQUIRED:
-            final_error = (
-                "请先登录 Codex CLI。运行以下命令完成认证：\n"
-                "  codex login\n"
-                "\n"
-                "或使用 API Key 认证：\n"
-                "  printenv OPENAI_API_KEY | codex login --with-api-key\n"
-                "\n" + err_message
-            )
-        elif error_kind == ErrorKind.INVALID_PATH:
-            final_error = (
-                "工作目录路径非法（Windows 常见：cd 参数被包了字面引号，触发 os error 123）。\n"
-                f"已归一化路径：{cd_path}\n"
-                "正确写法：cd=C:/Users/you/project  或  cd=C:\\\\Users\\\\you\\\\project\n"
-                '错误写法：cd="C:/Users/you/project"  （引号会成为路径的一部分）\n'
-                "\n" + err_message
-            )
+    if last_error:
+        error_kind = last_error["error_kind"]
+        err_message = last_error["err_message"]
+        exit_code = last_error["exit_code"]
+        json_decode_errors = last_error["json_decode_errors"]
 
-        result = {
-            "success": False,
-            "tool": "codex",
-            "error": final_error,
-            "error_kind": error_kind,
-            "error_detail": build_error_detail(
-                message=err_message.strip().split("\n")[0] if err_message else "未知错误",
-                exit_code=exit_code,
-                last_lines=all_last_lines,
-                json_decode_errors=json_decode_errors,
-                idle_timeout_s=req.timeout if error_kind == ErrorKind.IDLE_TIMEOUT else None,
-                max_duration_s=req.max_duration if error_kind == ErrorKind.TIMEOUT else None,
-                retries=retries,
-            ),
-            "duration": metrics.format_duration(),
-        }
-
-    if req.return_all_messages:
-        result["all_messages"] = all_messages
-    if req.return_metrics:
-        result["metrics"] = metrics.to_dict()
-    return result
+    detail = build_error_detail(
+        message=err_message.strip().split("\n")[0] if err_message else "未知错误",
+        exit_code=exit_code,
+        last_lines=all_last_lines,
+        json_decode_errors=json_decode_errors,
+        idle_timeout_s=req.timeout if error_kind == ErrorKind.IDLE_TIMEOUT else None,
+        max_duration_s=req.max_duration if error_kind == ErrorKind.TIMEOUT else None,
+        retries=retries,
+    )
+    return ReviewResult(
+        success=False,
+        error_kind=error_kind,
+        error_message=err_message,
+        error_detail=detail,
+        duration_ms=metrics.duration_ms,
+        workdir=cd_path,
+        metrics=_maybe_metrics(req, metrics),
+        all_messages=_maybe_messages(req, all_messages),
+    )
