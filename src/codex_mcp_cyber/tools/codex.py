@@ -1,7 +1,6 @@
-"""Codex 工具兼容壳 — wire 参数 → run_review。
+"""Codex 工具 wire 壳 — 唯一 15 参 interface → ReviewRequest → to_wire。
 
-实现已加深到 codex_mcp_cyber.review / process / stream / errors。
-本模块保持历史 import 路径：codex_mcp_cyber.tools.codex.codex_tool
+历史 import 路径：codex_mcp_cyber.tools.codex.codex_tool
 """
 
 from __future__ import annotations
@@ -11,18 +10,6 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import Field
 
-from codex_mcp_cyber.errors import (  # noqa: F401 — 兼容 re-export
-    CommandNotFoundError,
-    CommandTimeoutError,
-    ErrorKind,
-    build_error_detail as _build_error_detail,
-    filter_last_lines as _filter_last_lines,
-    is_auth_error as _is_auth_error,
-    is_retryable_error as _is_retryable_error,
-    looks_like_invalid_path_error as _looks_like_invalid_path_error,
-    normalize_workdir as _normalize_workdir,
-)
-from codex_mcp_cyber.process import safe_codex_command  # noqa: F401
 from codex_mcp_cyber.review import ReviewRequest, run_review, to_wire
 
 

@@ -303,6 +303,21 @@ async def test_codex_tool_shell_returns_wire_dict_not_review_result(
     assert "SESSION_ID" in wire
 
 
+def test_server_registers_codex_tool_as_mcp_handler() -> None:
+    """server 只注册 tools.codex_tool，无第二份 15 参壳（ADR-0004）。"""
+    from codex_mcp_cyber.server import mcp
+    from codex_mcp_cyber.tools.codex import codex_tool as shell
+
+    tools = mcp._tool_manager.list_tools()
+    by_name = {t.name: t for t in tools}
+    assert "codex" in by_name
+    registered = by_name["codex"]
+    assert registered.name == "codex"
+    assert registered.fn is shell
+    assert "read-only" in (registered.description or "")
+    assert "审核" in (registered.description or "")
+
+
 def test_reduce_prioritizes_invalid_path_over_protocol() -> None:
     stream = reduce_codex_stream(
         ["Error: The filename, directory name, or volume label syntax is incorrect. (os error 123)"]
