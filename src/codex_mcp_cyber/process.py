@@ -8,22 +8,26 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol
+from typing import Callable, Literal, Optional, Protocol
 
 from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError
+
+Terminal = Literal["completed", "timeout", "idle_timeout"]
 
 
 @dataclass(frozen=True)
 class ProcessOutcome:
-    """一次进程执行的行流结果。"""
+    """一次进程执行的行流结果（含超时终态；单通道）。"""
 
     lines: list[str]
     exit_code: Optional[int]
     raw_output_lines: int
+    terminal: Terminal = "completed"
+    error_message: str = ""
 
 
 class CodexProcessRunner(Protocol):
-    """行流 seam：执行命令并产出 stdout 行 + exit code。"""
+    """行流 seam：执行命令并产出 ProcessOutcome（含 timeout terminal）。"""
 
     def run(
         self,
@@ -41,6 +45,8 @@ class ScriptedLinesRunner:
 
     lines: list[str]
     exit_code: Optional[int] = 0
+    terminal: Terminal = "completed"
+    error_message: str = ""
     calls: int = 0
 
     def run(
@@ -55,14 +61,20 @@ class ScriptedLinesRunner:
         self.calls += 1
         lines = list(self.lines)
         raw = sum(1 for line in lines if line)
-        return ProcessOutcome(lines=lines, exit_code=self.exit_code, raw_output_lines=raw)
+        return ProcessOutcome(
+            lines=lines,
+            exit_code=self.exit_code,
+            raw_output_lines=raw,
+            terminal=self.terminal,
+            error_message=self.error_message,
+        )
 
 
 @dataclass
 class SequenceRunner:
-    """测试 adapter：按调用次序返回不同 outcome 或抛超时。"""
+    """测试 adapter：按调用次序返回不同 ProcessOutcome。"""
 
-    steps: list[ProcessOutcome | CommandTimeoutError]
+    steps: list[ProcessOutcome]
     calls: int = 0
 
     def run(
@@ -78,8 +90,6 @@ class SequenceRunner:
             raise RuntimeError("SequenceRunner exhausted")
         step = self.steps[self.calls]
         self.calls += 1
-        if isinstance(step, CommandTimeoutError):
-            raise step
         return step
 
 
@@ -87,7 +97,7 @@ class PopenCodexRunner:
     """生产 adapter：真实 subprocess + 超时 + early-stop。
 
     对外 interface 仅 ``run(...) -> ProcessOutcome``（及 ``__init__`` 的谓词注入）。
-    线程 / queue / cleanup 是 implementation，不进 Protocol。
+    超时走 terminal，不 raise CommandTimeoutError。
     """
 
     GRACEFUL_SHUTDOWN_DELAY = 0.3
@@ -109,31 +119,16 @@ class PopenCodexRunner:
         terminal = self._resolve_terminal_predicate()
         popen_cmd = self._resolve_codex_path(cmd)
         process: subprocess.Popen[str] | None = None
-        # thread 经 box 回传，确保 _drain 异常路径 finally 仍能 join
         thread_box: list[threading.Thread | None] = [None]
         try:
             process = self._spawn(popen_cmd, prompt=prompt)
-            lines, exit_code, raw_output_lines = self._drain(
+            return self._drain(
                 process,
                 timeout=timeout,
                 max_duration=max_duration,
                 is_terminal_line=terminal,
                 thread_box=thread_box,
             )
-            return ProcessOutcome(
-                lines=lines,
-                exit_code=exit_code,
-                raw_output_lines=raw_output_lines,
-            )
-        except CommandTimeoutError as e:
-            # partial 由 _drain 挂在异常上（含谓词抛 CommandTimeoutError）
-            partial = list(e.partial_lines)
-            raise CommandTimeoutError(
-                str(e),
-                is_idle=e.is_idle,
-                partial_lines=partial,
-                raw_output_lines=len(partial),
-            ) from e
         finally:
             if process is not None:
                 self._cleanup(process, thread_box[0])
@@ -181,7 +176,6 @@ class PopenCodexRunner:
                         pass
             return process
         except BaseException:
-            # 含 KeyboardInterrupt / SystemExit：旧 finally 也会杀进程，不得泄漏
             self._cleanup(process, thread=None)
             raise
 
@@ -193,12 +187,8 @@ class PopenCodexRunner:
         max_duration: int,
         is_terminal_line: Callable[[str], bool],
         thread_box: list[threading.Thread | None],
-    ) -> tuple[list[str], Optional[int], int]:
-        """读 stdout 行至终态；返回 (lines, exit_code, raw_output_lines)。
-
-        超时 / 谓词异常：把 partial 挂到异常上后抛出；
-        reader thread 写入 thread_box，由 run.finally 统一 cleanup/join。
-        """
+    ) -> ProcessOutcome:
+        """读 stdout 至终态；超时返回 terminal=timeout|idle_timeout 的 ProcessOutcome。"""
         output_queue: queue.Queue[str | BaseException | None] = queue.Queue()
         raw_output_lines_holder = [0]
         grace = self.GRACEFUL_SHUTDOWN_DELAY
@@ -211,10 +201,9 @@ class PopenCodexRunner:
                         output_queue.put(stripped)
                         if stripped:
                             raw_output_lines_holder[0] += 1
-                        # 谓词异常不得被 I/O catch 吞掉（静默截断且可能 success）
                         try:
                             terminal = is_terminal_line(stripped)
-                        except Exception as pred_err:  # noqa: BLE001 — 透传给消费端
+                        except Exception as pred_err:  # noqa: BLE001
                             output_queue.put(pred_err)
                             break
                         if terminal:
@@ -233,21 +222,22 @@ class PopenCodexRunner:
         lines: list[str] = []
         start_time = time.time()
         last_activity_time = time.time()
-        timeout_error: CommandTimeoutError | None = None
+        timeout_terminal: Terminal | None = None
+        timeout_message = ""
         predicate_error: BaseException | None = None
 
         while True:
             now = time.time()
             if max_duration > 0 and (now - start_time) >= max_duration:
-                timeout_error = CommandTimeoutError(
-                    f"codex 执行超时（总时长超过 {max_duration}s），进程已终止。",
-                    is_idle=False,
+                timeout_terminal = "timeout"
+                timeout_message = (
+                    f"codex 执行超时（总时长超过 {max_duration}s），进程已终止。"
                 )
                 break
             if (now - last_activity_time) >= timeout:
-                timeout_error = CommandTimeoutError(
-                    f"codex 空闲超时（{timeout}s 无输出），进程已终止。",
-                    is_idle=True,
+                timeout_terminal = "idle_timeout"
+                timeout_message = (
+                    f"codex 空闲超时（{timeout}s 无输出），进程已终止。"
                 )
                 break
             try:
@@ -265,19 +255,32 @@ class PopenCodexRunner:
                     break
 
         if predicate_error is not None:
-            # 谓词抛 CommandTimeoutError 时保留已收集行（与旧外层 list 行为一致）
+            # 谓词抛 CommandTimeoutError → 收成单通道 ProcessOutcome
             if isinstance(predicate_error, CommandTimeoutError):
-                predicate_error.partial_lines = list(lines)
-                predicate_error.raw_output_lines = len(lines)
+                term: Terminal = (
+                    "idle_timeout" if predicate_error.is_idle else "timeout"
+                )
+                return ProcessOutcome(
+                    lines=list(lines),
+                    exit_code=None,
+                    raw_output_lines=len(lines),
+                    terminal=term,
+                    error_message=str(predicate_error),
+                )
             raise predicate_error
 
-        if timeout_error is not None:
-            timeout_error.partial_lines = list(lines)
-            timeout_error.raw_output_lines = len(lines)
-            raise timeout_error
+        if timeout_terminal is not None:
+            return ProcessOutcome(
+                lines=list(lines),
+                exit_code=None,
+                raw_output_lines=len(lines),
+                terminal=timeout_terminal,
+                error_message=timeout_message,
+            )
 
         exit_code: Optional[int] = None
-        wait_timeout_error: CommandTimeoutError | None = None
+        wait_timeout = False
+        wait_message = ""
         try:
             exit_code = process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -287,18 +290,20 @@ class PopenCodexRunner:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-            wait_timeout_error = CommandTimeoutError(
-                "codex 进程等待超时，进程已终止。",
-                is_idle=False,
-            )
+            wait_timeout = True
+            wait_message = "codex 进程等待超时，进程已终止。"
         finally:
             if thread.is_alive():
                 thread.join(timeout=5)
 
-        if wait_timeout_error is not None:
-            wait_timeout_error.partial_lines = list(lines)
-            wait_timeout_error.raw_output_lines = len(lines)
-            raise wait_timeout_error
+        if wait_timeout:
+            return ProcessOutcome(
+                lines=list(lines),
+                exit_code=None,
+                raw_output_lines=len(lines),
+                terminal="timeout",
+                error_message=wait_message,
+            )
 
         while not output_queue.empty():
             try:
@@ -307,15 +312,26 @@ class PopenCodexRunner:
                     continue
                 if isinstance(item, BaseException):
                     if isinstance(item, CommandTimeoutError):
-                        item.partial_lines = list(lines)
-                        item.raw_output_lines = len(lines)
+                        term = "idle_timeout" if item.is_idle else "timeout"
+                        return ProcessOutcome(
+                            lines=list(lines),
+                            exit_code=None,
+                            raw_output_lines=len(lines),
+                            terminal=term,
+                            error_message=str(item),
+                        )
                     raise item
                 if item:
                     lines.append(item)
             except queue.Empty:
                 break
 
-        return (lines, exit_code, raw_output_lines_holder[0])
+        return ProcessOutcome(
+            lines=lines,
+            exit_code=exit_code,
+            raw_output_lines=raw_output_lines_holder[0],
+            terminal="completed",
+        )
 
     def _cleanup(
         self,

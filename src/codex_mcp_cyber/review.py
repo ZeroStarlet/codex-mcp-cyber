@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,6 @@ from typing import Any, Dict, List, Literal, Optional
 
 from codex_mcp_cyber.errors import (
     CommandNotFoundError,
-    CommandTimeoutError,
     ErrorKind,
     build_error_detail,
     is_retryable_error,
@@ -20,6 +20,8 @@ from codex_mcp_cyber.errors import (
 )
 from codex_mcp_cyber.process import CodexProcessRunner, PopenCodexRunner
 from codex_mcp_cyber.stream import finalize_stream_outcome, reduce_codex_stream
+
+SleepFn = Callable[[float], Awaitable[None]]
 
 
 @dataclass
@@ -57,86 +59,92 @@ class ReviewResult:
     all_messages: Optional[list[dict[str, Any]]] = None
 
 
-@dataclass
-class MetricsCollector:
-    tool: str
-    prompt: str
-    sandbox: str
-    prompt_chars: int = field(init=False)
-    prompt_lines: int = field(init=False)
-    ts_start: datetime = field(init=False)
-    ts_end: Optional[datetime] = None
-    duration_ms: int = 0
-    success: bool = False
-    error_kind: Optional[str] = None
-    retries: int = 0
-    exit_code: Optional[int] = None
-    result_chars: int = 0
-    result_lines: int = 0
-    raw_output_lines: int = 0
-    json_decode_errors: int = 0
-
-    def __post_init__(self) -> None:
-        self.prompt_chars = len(self.prompt)
-        self.prompt_lines = self.prompt.count("\n") + 1
-        self.ts_start = datetime.now(timezone.utc)
-
-    def finish(
-        self,
-        success: bool,
-        error_kind: Optional[str] = None,
-        result: str = "",
-        exit_code: Optional[int] = None,
-        raw_output_lines: int = 0,
-        json_decode_errors: int = 0,
-        retries: int = 0,
-    ) -> None:
-        self.ts_end = datetime.now(timezone.utc)
-        self.duration_ms = int((self.ts_end - self.ts_start).total_seconds() * 1000)
-        self.success = success
-        self.error_kind = error_kind
-        self.result_chars = len(result)
-        self.result_lines = result.count("\n") + 1 if result else 0
-        self.exit_code = exit_code
-        self.raw_output_lines = raw_output_lines
-        self.json_decode_errors = json_decode_errors
-        self.retries = retries
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "ts_start": self.ts_start.isoformat() if self.ts_start else None,
-            "ts_end": self.ts_end.isoformat() if self.ts_end else None,
-            "duration_ms": self.duration_ms,
-            "tool": self.tool,
-            "sandbox": self.sandbox,
-            "success": self.success,
-            "error_kind": self.error_kind,
-            "retries": self.retries,
-            "exit_code": self.exit_code,
-            "prompt_chars": self.prompt_chars,
-            "prompt_lines": self.prompt_lines,
-            "result_chars": self.result_chars,
-            "result_lines": self.result_lines,
-            "raw_output_lines": self.raw_output_lines,
-            "json_decode_errors": self.json_decode_errors,
-        }
-
-    def format_duration(self) -> str:
-        return format_duration_ms(self.duration_ms)
-
-    def log_to_stderr(self) -> None:
-        metrics = {k: v for k, v in self.to_dict().items() if v is not None}
-        try:
-            print(json.dumps(metrics, ensure_ascii=False), file=sys.stderr)
-        except Exception:
-            pass
-
-
 def format_duration_ms(duration_ms: int) -> str:
     total_seconds = duration_ms // 1000
     minutes = total_seconds // 60
     seconds = total_seconds % 60
     return f"{minutes}m{seconds}s"
+
+
+def _metrics_from(
+    *,
+    req: ReviewRequest,
+    ts_start: datetime,
+    ts_end: datetime,
+    duration_ms: int,
+    result: ReviewResult,
+    result_text: str = "",
+    retries: int = 0,
+    exit_code: Optional[int] = None,
+    raw_output_lines: int = 0,
+    json_decode_errors: int = 0,
+) -> Dict[str, Any]:
+    """从结局 + 显式 result_text 派生 metrics（失败 partial 只进 metrics，不进 ReviewResult.text）。"""
+    text = result_text
+    return {
+        "ts_start": ts_start.isoformat(),
+        "ts_end": ts_end.isoformat(),
+        "duration_ms": duration_ms,
+        "tool": "codex",
+        "sandbox": req.sandbox,
+        "success": result.success,
+        "error_kind": result.error_kind,
+        "retries": retries,
+        "exit_code": exit_code,
+        "prompt_chars": len(req.prompt),
+        "prompt_lines": req.prompt.count("\n") + 1,
+        "result_chars": len(text),
+        "result_lines": text.count("\n") + 1 if text else 0,
+        "raw_output_lines": raw_output_lines,
+        "json_decode_errors": json_decode_errors,
+    }
+
+
+def _log_metrics(metrics: Dict[str, Any]) -> None:
+    payload = {k: v for k, v in metrics.items() if v is not None}
+    try:
+        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _finish(
+    req: ReviewRequest,
+    ts_start: datetime,
+    result: ReviewResult,
+    *,
+    result_text: str | None = None,
+    retries: int = 0,
+    exit_code: Optional[int] = None,
+    raw_output_lines: int = 0,
+    json_decode_errors: int = 0,
+) -> ReviewResult:
+    """挂 duration；按请求附 metrics / log。
+
+    result_text：metrics 用的正文（默认 result.text）。失败终局可传入 last.text
+    而保持 ReviewResult.text 为空串（行为冻结）。
+    """
+    ts_end = datetime.now(timezone.utc)
+    result.duration_ms = int((ts_end - ts_start).total_seconds() * 1000)
+    metrics_text = result.text if result_text is None else result_text
+    if req.return_metrics or req.log_metrics:
+        metrics = _metrics_from(
+            req=req,
+            ts_start=ts_start,
+            ts_end=ts_end,
+            duration_ms=result.duration_ms,
+            result=result,
+            result_text=metrics_text,
+            retries=retries,
+            exit_code=exit_code,
+            raw_output_lines=raw_output_lines,
+            json_decode_errors=json_decode_errors,
+        )
+        if req.log_metrics:
+            _log_metrics(metrics)
+        if req.return_metrics:
+            result.metrics = metrics
+    return result
 
 
 def _display_error(result: ReviewResult) -> str:
@@ -152,7 +160,9 @@ def _display_error(result: ReviewResult) -> str:
             "\n" + raw
         )
     if result.error_kind == ErrorKind.INVALID_PATH:
-        path_line = f"已归一化路径：{result.workdir}\n" if result.workdir is not None else ""
+        path_line = (
+            f"已归一化路径：{result.workdir}\n" if result.workdir is not None else ""
+        )
         return (
             "工作目录路径非法（Windows 常见：cd 参数被包了字面引号，触发 os error 123）。\n"
             f"{path_line}"
@@ -213,10 +223,6 @@ def _build_cmd(req: ReviewRequest, cd_path: Path) -> list[str]:
     return cmd
 
 
-def _maybe_metrics(req: ReviewRequest, metrics: MetricsCollector) -> Optional[Dict[str, Any]]:
-    return metrics.to_dict() if req.return_metrics else None
-
-
 def _maybe_messages(
     req: ReviewRequest, all_messages: list[dict[str, Any]]
 ) -> Optional[list[dict[str, Any]]]:
@@ -249,18 +255,16 @@ def _run_attempt(
     collect_messages: bool,
 ) -> _AttemptOutcome:
     """执行一次 runner 调用并归约。CommandNotFoundError 向上抛出。"""
-    try:
-        outcome = runner.run(
-            cmd,
-            prompt=prompt,
-            timeout=timeout,
-            max_duration=max_duration,
-        )
-    except CommandNotFoundError:
-        raise
-    except CommandTimeoutError as e:
-        # 超时诊断仅来自本轮 partial；不 finalize，避免盖住 timeout kind
-        partial = list(getattr(e, "partial_lines", None) or [])
+    outcome = runner.run(
+        cmd,
+        prompt=prompt,
+        timeout=timeout,
+        max_duration=max_duration,
+    )
+
+    # 单通道超时：只 reduce，不 finalize（ADR-0003）
+    if outcome.terminal in ("timeout", "idle_timeout"):
+        partial = list(outcome.lines)
         if partial:
             stream = reduce_codex_stream(partial, collect_messages=collect_messages)
             last_lines = stream.last_lines
@@ -270,13 +274,17 @@ def _run_attempt(
             last_lines = []
             json_decode_errors = 0
             all_messages = []
-        raw_lines = int(getattr(e, "raw_output_lines", 0) or len(partial))
+        kind = (
+            ErrorKind.IDLE_TIMEOUT
+            if outcome.terminal == "idle_timeout"
+            else ErrorKind.TIMEOUT
+        )
         return _AttemptOutcome(
             success=False,
-            error_kind=ErrorKind.IDLE_TIMEOUT if e.is_idle else ErrorKind.TIMEOUT,
-            error_message=str(e),
+            error_kind=kind,
+            error_message=outcome.error_message or "timeout",
             exit_code=None,
-            raw_output_lines=raw_lines,
+            raw_output_lines=outcome.raw_output_lines or len(partial),
             json_decode_errors=json_decode_errors,
             last_lines=last_lines,
             all_messages=all_messages,
@@ -286,10 +294,10 @@ def _run_attempt(
     stream = finalize_stream_outcome(stream, exit_code=outcome.exit_code)
     return _AttemptOutcome(
         success=not stream.had_error,
-        text=stream.agent_messages,
-        session_id=stream.thread_id,
+        text=stream.text,
+        session_id=stream.session_id,
         error_kind=stream.error_kind,
-        error_message=stream.err_message,
+        error_message=stream.error_message,
         exit_code=outcome.exit_code,
         raw_output_lines=outcome.raw_output_lines,
         json_decode_errors=stream.json_decode_errors,
@@ -301,9 +309,15 @@ def _run_attempt(
 async def run_review(
     req: ReviewRequest,
     runner: CodexProcessRunner | None = None,
+    *,
+    sleep: SleepFn | None = None,
 ) -> ReviewResult:
-    """执行审核。返回领域结局 ReviewResult（wire 由 to_wire 映射）。"""
-    metrics = MetricsCollector(tool="codex", prompt=req.prompt, sandbox=req.sandbox)
+    """执行审核。返回领域结局 ReviewResult（wire 由 to_wire 映射）。
+
+    sleep：internal seam，默认 asyncio.sleep；测试可注入即时返回。
+    """
+    ts_start = datetime.now(timezone.utc)
+    sleep_fn: SleepFn = sleep or asyncio.sleep
     active_runner: CodexProcessRunner = runner or PopenCodexRunner()
 
     cd_path = normalize_workdir(req.cd)
@@ -312,17 +326,17 @@ async def run_review(
             f"工作目录不存在或路径非法：{cd_path}\n"
             f"（原始输入：{req.cd!r}）"
         )
-        metrics.finish(success=False, error_kind=ErrorKind.INVALID_PATH, retries=0)
-        if req.log_metrics:
-            metrics.log_to_stderr()
-        return ReviewResult(
-            success=False,
-            error_kind=ErrorKind.INVALID_PATH,
-            error_message=msg,
-            error_detail=build_error_detail(msg),
-            duration_ms=metrics.duration_ms,
-            workdir=cd_path,
-            metrics=_maybe_metrics(req, metrics),
+        return _finish(
+            req,
+            ts_start,
+            ReviewResult(
+                success=False,
+                error_kind=ErrorKind.INVALID_PATH,
+                error_message=msg,
+                error_detail=build_error_detail(msg),
+                workdir=cd_path,
+            ),
+            retries=0,
         )
 
     cmd = _build_cmd(req, cd_path)
@@ -341,65 +355,44 @@ async def run_review(
                 collect_messages=req.return_all_messages,
             )
         except CommandNotFoundError as e:
-            metrics.finish(
-                success=False,
-                error_kind=ErrorKind.COMMAND_NOT_FOUND,
+            return _finish(
+                req,
+                ts_start,
+                ReviewResult(
+                    success=False,
+                    error_kind=ErrorKind.COMMAND_NOT_FOUND,
+                    error_message=str(e),
+                    error_detail=build_error_detail(str(e)),
+                    workdir=cd_path,
+                ),
                 retries=retries,
-            )
-            if req.log_metrics:
-                metrics.log_to_stderr()
-            return ReviewResult(
-                success=False,
-                error_kind=ErrorKind.COMMAND_NOT_FOUND,
-                error_message=str(e),
-                error_detail=build_error_detail(str(e)),
-                duration_ms=metrics.duration_ms,
-                workdir=cd_path,
-                metrics=_maybe_metrics(req, metrics),
             )
 
         if attempt.success:
-            metrics.finish(
-                success=True,
-                result=attempt.text,
+            return _finish(
+                req,
+                ts_start,
+                ReviewResult(
+                    success=True,
+                    text=attempt.text,
+                    session_id=attempt.session_id,
+                    workdir=cd_path,
+                    all_messages=_maybe_messages(req, attempt.all_messages),
+                ),
+                retries=retries,
                 exit_code=attempt.exit_code,
                 raw_output_lines=attempt.raw_output_lines,
                 json_decode_errors=attempt.json_decode_errors,
-                retries=retries,
-            )
-            if req.log_metrics:
-                metrics.log_to_stderr()
-            return ReviewResult(
-                success=True,
-                text=attempt.text,
-                session_id=attempt.session_id,
-                duration_ms=metrics.duration_ms,
-                workdir=cd_path,
-                metrics=_maybe_metrics(req, metrics),
-                all_messages=_maybe_messages(req, attempt.all_messages),
             )
 
         last = attempt
         if is_retryable_error(attempt.error_kind) and retries < max_retries:
             retries += 1
-            await asyncio.sleep(0.5 * (2 ** (retries - 1)))
+            await sleep_fn(0.5 * (2 ** (retries - 1)))
             continue
         break
 
-    # 失败终局：仅来自最后一次 AttemptOutcome（无 last_error dict）
     assert last is not None
-    metrics.finish(
-        success=False,
-        error_kind=last.error_kind,
-        result=last.text,
-        exit_code=last.exit_code,
-        raw_output_lines=last.raw_output_lines,
-        json_decode_errors=last.json_decode_errors,
-        retries=retries,
-    )
-    if req.log_metrics:
-        metrics.log_to_stderr()
-
     detail = build_error_detail(
         message=(
             last.error_message.strip().split("\n")[0]
@@ -417,13 +410,21 @@ async def run_review(
         ),
         retries=retries,
     )
-    return ReviewResult(
-        success=False,
-        error_kind=last.error_kind,
-        error_message=last.error_message,
-        error_detail=detail,
-        duration_ms=metrics.duration_ms,
-        workdir=cd_path,
-        metrics=_maybe_metrics(req, metrics),
-        all_messages=_maybe_messages(req, last.all_messages),
+    return _finish(
+        req,
+        ts_start,
+        ReviewResult(
+            success=False,
+            # 失败终局 text 保持空串（行为冻结）；partial 仅经 result_text 进 metrics
+            error_kind=last.error_kind,
+            error_message=last.error_message,
+            error_detail=detail,
+            workdir=cd_path,
+            all_messages=_maybe_messages(req, last.all_messages),
+        ),
+        result_text=last.text,
+        retries=retries,
+        exit_code=last.exit_code,
+        raw_output_lines=last.raw_output_lines,
+        json_decode_errors=last.json_decode_errors,
     )
