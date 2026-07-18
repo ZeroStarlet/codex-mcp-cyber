@@ -223,6 +223,81 @@ def _maybe_messages(
     return all_messages if req.return_all_messages else None
 
 
+@dataclass
+class _AttemptOutcome:
+    """一次行流尝试的内部结局（成功 / 失败 / 超时同型）。不导出。"""
+
+    success: bool
+    text: str = ""
+    session_id: Optional[str] = None
+    error_kind: Optional[str] = None
+    error_message: str = ""
+    exit_code: Optional[int] = None
+    raw_output_lines: int = 0
+    json_decode_errors: int = 0
+    last_lines: list[str] = field(default_factory=list)
+    all_messages: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _run_attempt(
+    runner: CodexProcessRunner,
+    cmd: list[str],
+    *,
+    prompt: str,
+    timeout: int,
+    max_duration: int,
+    collect_messages: bool,
+) -> _AttemptOutcome:
+    """执行一次 runner 调用并归约。CommandNotFoundError 向上抛出。"""
+    try:
+        outcome = runner.run(
+            cmd,
+            prompt=prompt,
+            timeout=timeout,
+            max_duration=max_duration,
+        )
+    except CommandNotFoundError:
+        raise
+    except CommandTimeoutError as e:
+        # 超时诊断仅来自本轮 partial；不 finalize，避免盖住 timeout kind
+        partial = list(getattr(e, "partial_lines", None) or [])
+        if partial:
+            stream = reduce_codex_stream(partial, collect_messages=collect_messages)
+            last_lines = stream.last_lines
+            json_decode_errors = stream.json_decode_errors
+            all_messages = stream.all_messages
+        else:
+            last_lines = []
+            json_decode_errors = 0
+            all_messages = []
+        raw_lines = int(getattr(e, "raw_output_lines", 0) or len(partial))
+        return _AttemptOutcome(
+            success=False,
+            error_kind=ErrorKind.IDLE_TIMEOUT if e.is_idle else ErrorKind.TIMEOUT,
+            error_message=str(e),
+            exit_code=None,
+            raw_output_lines=raw_lines,
+            json_decode_errors=json_decode_errors,
+            last_lines=last_lines,
+            all_messages=all_messages,
+        )
+
+    stream = reduce_codex_stream(outcome.lines, collect_messages=collect_messages)
+    stream = finalize_stream_outcome(stream, exit_code=outcome.exit_code)
+    return _AttemptOutcome(
+        success=not stream.had_error,
+        text=stream.agent_messages,
+        session_id=stream.thread_id,
+        error_kind=stream.error_kind,
+        error_message=stream.err_message,
+        exit_code=outcome.exit_code,
+        raw_output_lines=outcome.raw_output_lines,
+        json_decode_errors=stream.json_decode_errors,
+        last_lines=stream.last_lines,
+        all_messages=stream.all_messages,
+    )
+
+
 async def run_review(
     req: ReviewRequest,
     runner: CodexProcessRunner | None = None,
@@ -253,36 +328,17 @@ async def run_review(
     cmd = _build_cmd(req, cd_path)
     max_retries = max(0, req.max_retries)
     retries = 0
-    last_error: Optional[Dict[str, Any]] = None
-    all_last_lines: list[str] = []
-    success = False
-    error_kind: Optional[str] = None
-    err_message = ""
-    agent_messages = ""
-    thread_id: Optional[str] = None
-    exit_code: Optional[int] = None
-    raw_output_lines = 0
-    json_decode_errors = 0
-    all_messages: list[dict[str, Any]] = []
+    last: _AttemptOutcome | None = None
 
     while retries <= max_retries:
-        # 每轮尝试独立状态，避免超时/失败混入上一轮 exit_code、messages 等
-        attempt_exit_code: Optional[int] = None
-        attempt_raw_lines = 0
-        attempt_json_decode_errors = 0
-        attempt_all_messages: list[dict[str, Any]] = []
-        attempt_last_lines: list[str] = []
-        attempt_agent_messages = ""
-        attempt_thread_id: Optional[str] = None
-        attempt_err_message = ""
-        attempt_error_kind: Optional[str] = None
-
         try:
-            outcome = active_runner.run(
+            attempt = _run_attempt(
+                active_runner,
                 cmd,
                 prompt=req.prompt,
                 timeout=req.timeout,
                 max_duration=req.max_duration,
+                collect_messages=req.return_all_messages,
             )
         except CommandNotFoundError as e:
             metrics.finish(
@@ -301,139 +357,73 @@ async def run_review(
                 workdir=cd_path,
                 metrics=_maybe_metrics(req, metrics),
             )
-        except CommandTimeoutError as e:
-            error_kind = ErrorKind.IDLE_TIMEOUT if e.is_idle else ErrorKind.TIMEOUT
-            err_message = str(e)
-            # 超时诊断仅来自本轮 partial_lines，不沿用上一轮 exit_code / decode 计数
-            partial = list(getattr(e, "partial_lines", None) or [])
-            if partial:
-                stream = reduce_codex_stream(
-                    partial, collect_messages=req.return_all_messages
-                )
-                attempt_last_lines = stream.last_lines
-                attempt_json_decode_errors = stream.json_decode_errors
-                attempt_all_messages = stream.all_messages
-                # 超时本身即为失败原因；不把 partial 归约成 success
-            else:
-                attempt_last_lines = []
-                attempt_json_decode_errors = 0
-                attempt_all_messages = []
-            attempt_raw_lines = int(getattr(e, "raw_output_lines", 0) or len(partial))
-            all_last_lines = attempt_last_lines
-            all_messages = attempt_all_messages
-            json_decode_errors = attempt_json_decode_errors
-            raw_output_lines = attempt_raw_lines
-            exit_code = None
-            agent_messages = ""
-            thread_id = None
-            last_error = {
-                "error_kind": error_kind,
-                "err_message": err_message,
-                "exit_code": None,
-                "json_decode_errors": attempt_json_decode_errors,
-                "raw_output_lines": attempt_raw_lines,
-            }
-            success = False
-            if retries < max_retries:
-                retries += 1
-                await asyncio.sleep(0.5 * (2 ** (retries - 1)))
-                continue
-            break
 
-        attempt_exit_code = outcome.exit_code
-        attempt_raw_lines = outcome.raw_output_lines
-        stream = reduce_codex_stream(
-            outcome.lines, collect_messages=req.return_all_messages
-        )
-        stream = finalize_stream_outcome(stream, exit_code=attempt_exit_code)
-        attempt_agent_messages = stream.agent_messages
-        attempt_thread_id = stream.thread_id
-        attempt_err_message = stream.err_message
-        attempt_error_kind = stream.error_kind
-        attempt_json_decode_errors = stream.json_decode_errors
-        attempt_all_messages = stream.all_messages
-        attempt_last_lines = stream.last_lines
+        if attempt.success:
+            metrics.finish(
+                success=True,
+                result=attempt.text,
+                exit_code=attempt.exit_code,
+                raw_output_lines=attempt.raw_output_lines,
+                json_decode_errors=attempt.json_decode_errors,
+                retries=retries,
+            )
+            if req.log_metrics:
+                metrics.log_to_stderr()
+            return ReviewResult(
+                success=True,
+                text=attempt.text,
+                session_id=attempt.session_id,
+                duration_ms=metrics.duration_ms,
+                workdir=cd_path,
+                metrics=_maybe_metrics(req, metrics),
+                all_messages=_maybe_messages(req, attempt.all_messages),
+            )
 
-        exit_code = attempt_exit_code
-        raw_output_lines = attempt_raw_lines
-        agent_messages = attempt_agent_messages
-        thread_id = attempt_thread_id
-        err_message = attempt_err_message
-        error_kind = attempt_error_kind
-        json_decode_errors = attempt_json_decode_errors
-        all_messages = attempt_all_messages
-        all_last_lines = attempt_last_lines
-        success = not stream.had_error
-
-        if success:
-            break
-
-        if is_retryable_error(error_kind) and retries < max_retries:
-            last_error = {
-                "error_kind": error_kind,
-                "err_message": err_message,
-                "exit_code": exit_code,
-                "json_decode_errors": json_decode_errors,
-                "raw_output_lines": raw_output_lines,
-            }
+        last = attempt
+        if is_retryable_error(attempt.error_kind) and retries < max_retries:
             retries += 1
             await asyncio.sleep(0.5 * (2 ** (retries - 1)))
             continue
-
-        last_error = {
-            "error_kind": error_kind,
-            "err_message": err_message,
-            "exit_code": exit_code,
-            "json_decode_errors": json_decode_errors,
-            "raw_output_lines": raw_output_lines,
-        }
         break
 
+    # 失败终局：仅来自最后一次 AttemptOutcome（无 last_error dict）
+    assert last is not None
     metrics.finish(
-        success=success,
-        error_kind=error_kind,
-        result=agent_messages,
-        exit_code=exit_code,
-        raw_output_lines=raw_output_lines,
-        json_decode_errors=json_decode_errors,
+        success=False,
+        error_kind=last.error_kind,
+        result=last.text,
+        exit_code=last.exit_code,
+        raw_output_lines=last.raw_output_lines,
+        json_decode_errors=last.json_decode_errors,
         retries=retries,
     )
     if req.log_metrics:
         metrics.log_to_stderr()
 
-    if success:
-        return ReviewResult(
-            success=True,
-            text=agent_messages,
-            session_id=thread_id,
-            duration_ms=metrics.duration_ms,
-            workdir=cd_path,
-            metrics=_maybe_metrics(req, metrics),
-            all_messages=_maybe_messages(req, all_messages),
-        )
-
-    if last_error:
-        error_kind = last_error["error_kind"]
-        err_message = last_error["err_message"]
-        exit_code = last_error["exit_code"]
-        json_decode_errors = last_error["json_decode_errors"]
-
     detail = build_error_detail(
-        message=err_message.strip().split("\n")[0] if err_message else "未知错误",
-        exit_code=exit_code,
-        last_lines=all_last_lines,
-        json_decode_errors=json_decode_errors,
-        idle_timeout_s=req.timeout if error_kind == ErrorKind.IDLE_TIMEOUT else None,
-        max_duration_s=req.max_duration if error_kind == ErrorKind.TIMEOUT else None,
+        message=(
+            last.error_message.strip().split("\n")[0]
+            if last.error_message
+            else "未知错误"
+        ),
+        exit_code=last.exit_code,
+        last_lines=last.last_lines,
+        json_decode_errors=last.json_decode_errors,
+        idle_timeout_s=(
+            req.timeout if last.error_kind == ErrorKind.IDLE_TIMEOUT else None
+        ),
+        max_duration_s=(
+            req.max_duration if last.error_kind == ErrorKind.TIMEOUT else None
+        ),
         retries=retries,
     )
     return ReviewResult(
         success=False,
-        error_kind=error_kind,
-        error_message=err_message,
+        error_kind=last.error_kind,
+        error_message=last.error_message,
         error_detail=detail,
         duration_ms=metrics.duration_ms,
         workdir=cd_path,
         metrics=_maybe_metrics(req, metrics),
-        all_messages=_maybe_messages(req, all_messages),
+        all_messages=_maybe_messages(req, last.all_messages),
     )

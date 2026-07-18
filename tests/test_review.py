@@ -396,7 +396,7 @@ async def test_timeout_after_failed_attempt_does_not_leak_prior_exit(
         ]
     )
     result = await run_review(
-        ReviewRequest(prompt="x", cd=tmp_path, max_retries=1),
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=1, return_metrics=True),
         runner=runner,
     )
     assert result.success is False
@@ -407,6 +407,110 @@ async def test_timeout_after_failed_attempt_does_not_leak_prior_exit(
     # last_lines 仅来自超时这一轮的 partial
     assert detail.get("last_lines") == ["partial-only"]
     assert runner.calls == 2
+    assert result.metrics is not None
+    assert result.metrics.get("exit_code") is None
+    assert result.metrics.get("error_kind") == ErrorKind.IDLE_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_timeout_partial_looking_successful_stays_timeout(
+    tmp_path: Path,
+) -> None:
+    """超时 partial 即使像完整成功 JSONL，也不得 finalize 成 success。"""
+    partial = _ok_lines("SHOULD-NOT-WIN", thread_id="sess-partial")
+    runner = SequenceRunner(
+        steps=[
+            CommandTimeoutError(
+                "idle timeout",
+                is_idle=True,
+                partial_lines=partial,
+                raw_output_lines=len(partial),
+            ),
+        ]
+    )
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=0),
+        runner=runner,
+    )
+    assert result.success is False
+    assert result.error_kind == ErrorKind.IDLE_TIMEOUT
+    assert result.text == ""
+    assert result.session_id is None
+    # 未 finalize：不应因 partial 缺 session 被盖成 protocol_missing_session
+    assert result.error_kind != ErrorKind.PROTOCOL_MISSING_SESSION
+    assert runner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retryable_failure_then_success_records_metrics(
+    tmp_path: Path,
+) -> None:
+    runner = SequenceRunner(
+        steps=[
+            ProcessOutcome(lines=["not-json-line"], exit_code=1, raw_output_lines=1),
+            ProcessOutcome(lines=_ok_lines("RECOVERED"), exit_code=0, raw_output_lines=4),
+        ]
+    )
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=1, return_metrics=True),
+        runner=runner,
+    )
+    assert result.success is True
+    assert result.text == "RECOVERED"
+    assert result.session_id == "sess-1"
+    assert runner.calls == 2
+    assert result.metrics is not None
+    assert result.metrics["retries"] == 1
+    assert result.metrics["exit_code"] == 0
+    assert result.metrics["success"] is True
+    assert result.metrics["result_chars"] == len("RECOVERED")
+    assert result.metrics.get("ts_end") is not None
+
+
+@pytest.mark.asyncio
+async def test_command_not_found_does_not_retry_when_max_retries_positive(
+    tmp_path: Path,
+) -> None:
+    runner = _RaiseNotFoundRunner()
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=3),
+        runner=runner,  # type: ignore[arg-type]
+    )
+    assert result.success is False
+    assert result.error_kind == ErrorKind.COMMAND_NOT_FOUND
+    # NotFound 不进 AttemptOutcome 重试；runner 语义上每次 raise 即一次尝试
+    # SequenceRunner 才有 calls；此处用可计数的包装验证只调用一次
+    # _RaiseNotFoundRunner 无 calls —— 用 SequenceRunner 风格计数包装
+
+
+class _CountingNotFoundRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(
+        self,
+        cmd: list[str],
+        *,
+        prompt: str,
+        timeout: int,
+        max_duration: int,
+    ) -> ProcessOutcome:
+        del cmd, prompt, timeout, max_duration
+        self.calls += 1
+        raise CommandNotFoundError("未找到 codex CLI（测试）")
+
+
+@pytest.mark.asyncio
+async def test_command_not_found_runner_called_once_with_retries(
+    tmp_path: Path,
+) -> None:
+    runner = _CountingNotFoundRunner()
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=3),
+        runner=runner,  # type: ignore[arg-type]
+    )
+    assert result.error_kind == ErrorKind.COMMAND_NOT_FOUND
+    assert runner.calls == 1
 
 
 @pytest.mark.asyncio
