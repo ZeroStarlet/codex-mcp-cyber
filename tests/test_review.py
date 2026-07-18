@@ -11,7 +11,10 @@ from codex_mcp_cyber.errors import (
     CommandNotFoundError,
     CommandTimeoutError,
     ErrorKind,
+    build_error_detail,
+    filter_last_lines,
     normalize_workdir,
+    redact_tool_result_event,
 )
 from codex_mcp_cyber.process import ProcessOutcome, ScriptedLinesRunner, SequenceRunner
 from codex_mcp_cyber.review import ReviewRequest, run_review, to_wire
@@ -555,3 +558,122 @@ async def test_quoted_workdir_normalizes_to_tmp(tmp_path: Path) -> None:
         runner=runner,
     )
     assert result.success is True
+
+
+def _fat_tool_result_event(secret: str = "SECRET-BLOB-DO-NOT-LEAK") -> dict:
+    return {
+        "type": "item.completed",
+        "item": {
+            "id": "item_tool",
+            "type": "tool_result",
+            "content": secret * 20,
+        },
+    }
+
+
+def test_redact_tool_result_event_truncates_only_tool_result() -> None:
+    fat = _fat_tool_result_event()
+    out = redact_tool_result_event(fat)
+    assert out is not fat
+    assert out["item"]["content"] == "[truncated]"
+    assert fat["item"]["content"] != "[truncated]"  # 不改原对象
+
+    plain = {
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": "hi", "meta": {"nested": ["a"]}},
+    }
+    plain_out = redact_tool_result_event(plain)
+    assert plain_out["item"]["text"] == "hi"
+    assert plain_out is not plain
+    # 深拷贝：改返回值不得污染原嵌套结构
+    plain_out["item"]["meta"]["nested"].append("mutated")
+    plain_out["item"]["text"] = "changed"
+    assert plain["item"]["text"] == "hi"
+    assert plain["item"]["meta"]["nested"] == ["a"]
+
+
+def test_filter_last_lines_redacts_tool_result_content() -> None:
+    secret = "TOP-SECRET-PAYLOAD"
+    line = json.dumps(_fat_tool_result_event(secret), ensure_ascii=False)
+    filtered = filter_last_lines([line], max_lines=50)
+    assert len(filtered) == 1
+    parsed = json.loads(filtered[0])
+    assert parsed["item"]["type"] == "tool_result"
+    assert parsed["item"]["content"] == "[truncated]"
+    assert secret not in filtered[0]
+
+
+def test_filter_last_lines_preserves_non_tool_result_line_bytes() -> None:
+    """非 tool_result JSON 行必须原样保留（空白/键序/separators 不 re-dump）。"""
+    weird = '  { "type" : "item.completed", "item" : { "type" : "agent_message", "text" : "x" } }  '
+    plain_text = "not-json-line"
+    filtered = filter_last_lines([weird, plain_text], max_lines=50)
+    assert filtered == [weird, plain_text]
+    assert filtered[0] is weird or filtered[0] == weird
+
+
+def test_build_error_detail_last_lines_use_redaction() -> None:
+    secret = "ERR-SECRET"
+    line = json.dumps(_fat_tool_result_event(secret), ensure_ascii=False)
+    detail = build_error_detail(message="fail", last_lines=[line])
+    joined = json.dumps(detail, ensure_ascii=False)
+    assert secret not in joined
+    assert detail["last_lines"][0]
+    assert "[truncated]" in detail["last_lines"][0]
+
+
+@pytest.mark.asyncio
+async def test_all_messages_path_redacts_tool_result(tmp_path: Path) -> None:
+    secret = "ALLMSG-SECRET"
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "sess-r"}),
+        json.dumps(_fat_tool_result_event(secret), ensure_ascii=False),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "item_0", "type": "agent_message", "text": "OK"},
+            }
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    result = await run_review(
+        ReviewRequest(
+            prompt="x",
+            cd=tmp_path,
+            max_retries=0,
+            return_all_messages=True,
+        ),
+        runner=ScriptedLinesRunner(lines=lines, exit_code=0),
+    )
+    assert result.success is True
+    assert result.all_messages is not None
+    blob = json.dumps(result.all_messages, ensure_ascii=False)
+    assert secret not in blob
+    assert any(
+        isinstance(m.get("item"), dict)
+        and m["item"].get("type") == "tool_result"
+        and m["item"].get("content") == "[truncated]"
+        for m in result.all_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_failure_error_detail_redacts_tool_result_last_lines(
+    tmp_path: Path,
+) -> None:
+    secret = "FAIL-SECRET"
+    # 无 thread / agent → finalize 失败；last_lines 仍含 tool_result 行
+    lines = [
+        json.dumps(_fat_tool_result_event(secret), ensure_ascii=False),
+        "not-json-either",
+    ]
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=0),
+        runner=ScriptedLinesRunner(lines=lines, exit_code=1),
+    )
+    assert result.success is False
+    detail = result.error_detail or {}
+    last = detail.get("last_lines") or []
+    joined = "\n".join(str(x) for x in last)
+    assert secret not in joined
+    assert any("[truncated]" in str(x) for x in last)

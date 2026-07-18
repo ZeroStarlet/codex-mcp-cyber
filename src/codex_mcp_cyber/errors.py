@@ -92,18 +92,31 @@ def is_retryable_error(error_kind: Optional[str], err_message: str = "") -> bool
     return True
 
 
+def redact_tool_result_event(event: dict[str, Any]) -> dict[str, Any]:
+    """对已解析 JSON 事件做 tool_result 脱敏（deepcopy）。
+
+    仅当 item.type == tool_result 且存在 content 键时，将 content 置为 "[truncated]"。
+    """
+    safe = copy.deepcopy(event)
+    item = safe.get("item", {})
+    if isinstance(item, dict) and item.get("type") == "tool_result" and "content" in item:
+        item["content"] = "[truncated]"
+    return safe
+
+
 def filter_last_lines(lines: list[str], max_lines: int = 50) -> list[str]:
     """过滤 last_lines，脱敏 tool_result 中的大内容。"""
     filtered: list[str] = []
     for line in lines:
         try:
             data = json.loads(line)
+            if not isinstance(data, dict):
+                filtered.append(line)
+                continue
             item = data.get("item", {})
-            if item.get("type") == "tool_result":
-                data = copy.deepcopy(data)
-                if "content" in data["item"]:
-                    data["item"]["content"] = "[truncated]"
-                filtered.append(json.dumps(data, ensure_ascii=False))
+            if isinstance(item, dict) and item.get("type") == "tool_result":
+                redacted = redact_tool_result_event(data)
+                filtered.append(json.dumps(redacted, ensure_ascii=False))
                 continue
             filtered.append(line)
         except (json.JSONDecodeError, TypeError, AttributeError):

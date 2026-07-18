@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import re
 from dataclasses import dataclass, field
@@ -12,6 +11,7 @@ from codex_mcp_cyber.errors import (
     ErrorKind,
     is_auth_error,
     looks_like_invalid_path_error,
+    redact_tool_result_event,
 )
 
 
@@ -63,12 +63,7 @@ def reduce_codex_stream(
             line_dict = parsed
 
             if collect_messages:
-                safe_dict = copy.deepcopy(line_dict)
-                item = safe_dict.get("item", {})
-                if isinstance(item, dict) and item.get("type") == "tool_result":
-                    if "content" in item:
-                        item["content"] = "[truncated]"
-                out.all_messages.append(safe_dict)
+                out.all_messages.append(redact_tool_result_event(line_dict))
 
             item = line_dict.get("item", {})
             if item is None or not isinstance(item, dict):
