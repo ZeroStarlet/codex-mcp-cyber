@@ -50,11 +50,46 @@ class ErrorKind:
     COMMAND_NOT_FOUND = "command_not_found"
     UPSTREAM_ERROR = "upstream_error"
     AUTH_REQUIRED = "auth_required"  # 需要登录认证
+    INVALID_PATH = "invalid_path"  # 工作目录非法 / 不存在（常见于 cd 带了字面引号）
     JSON_DECODE = "json_decode"
     PROTOCOL_MISSING_SESSION = "protocol_missing_session"
     EMPTY_RESULT = "empty_result"
     SUBPROCESS_ERROR = "subprocess_error"
     UNEXPECTED_EXCEPTION = "unexpected_exception"
+
+
+# ============================================================================
+# 路径归一化
+# ============================================================================
+
+_OS_ERROR_123_MARKERS = (
+    "os error 123",
+    "文件名、目录名或卷标语法不正确",
+    "the filename, directory name, or volume label syntax is incorrect",
+)
+
+
+def _normalize_workdir(cd: Path | str) -> Path:
+    """归一化工作目录路径。
+
+    MCP 调用方偶尔会把路径写成字面量引号字符串，例如：
+      '"C:/Users/foo/project"'
+    在 Windows 上这会触发 WinError 123（文件名语法不正确），
+    Codex CLI 以纯文本报错退出，随后被误判为 protocol_missing_session。
+
+    这里剥掉包裹引号并返回 Path，不改变合法路径的语义。
+    """
+    text = str(cd).strip()
+    # 多层包裹（'"..."' / "\"...\""）也一并剥掉
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    return Path(text)
+
+
+def _looks_like_invalid_path_error(text: str) -> bool:
+    """检测 Codex / OS 返回的非法路径错误（含 WinError 123）。"""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _OS_ERROR_123_MARKERS)
 
 
 # ============================================================================
@@ -443,6 +478,8 @@ def _is_retryable_error(error_kind: Optional[str], err_message: str) -> bool:
         return False
     if error_kind == ErrorKind.AUTH_REQUIRED:
         return False
+    if error_kind == ErrorKind.INVALID_PATH:
+        return False  # 路径非法重试无意义，需调用方修正 cd
     # 其他错误都可以重试
     return True
 
@@ -507,11 +544,36 @@ async def codex_tool(
     # 初始化指标收集器
     metrics = MetricsCollector(tool="codex", prompt=PROMPT, sandbox=sandbox)
 
+    # 归一化工作目录：剥掉字面引号，避免 Windows WinError 123
+    # （MCP 调用方常把路径写成 '"C:/..."'，Path 会原样保留引号字符）
+    cd_path = _normalize_workdir(cd)
+    if not cd_path.exists():
+        msg = (
+            f"工作目录不存在或路径非法：{cd_path}\n"
+            f"（原始输入：{cd!r}）\n"
+            "提示：cd 参数不要加引号，传 C:/path/to/repo 或 C:\\\\path\\\\to\\\\repo，"
+            "不要传 \"C:/path/to/repo\"。"
+        )
+        metrics.finish(success=False, error_kind=ErrorKind.INVALID_PATH, retries=0)
+        if log_metrics:
+            metrics.log_to_stderr()
+        early: Dict[str, Any] = {
+            "success": False,
+            "tool": "codex",
+            "error": msg,
+            "error_kind": ErrorKind.INVALID_PATH,
+            "error_detail": _build_error_detail(msg),
+            "duration": metrics.format_duration(),
+        }
+        if return_metrics:
+            early["metrics"] = metrics.to_dict()
+        return early
+
     # 归一化可选参数
     image_list = image if isinstance(image, list) else ([image] if isinstance(image, (str, Path)) else [])
 
     # 构建命令（shell=False 时不需要转义）
-    cmd = ["codex", "exec", "--sandbox", sandbox, "--cd", str(cd), "--json"]
+    cmd = ["codex", "exec", "--sandbox", sandbox, "--cd", str(cd_path), "--json"]
 
     if image_list:
         cmd.extend(["--image", ",".join(str(p) for p in image_list)])
@@ -620,9 +682,13 @@ async def codex_tool(
                                         error_kind = ErrorKind.UPSTREAM_ERROR
 
                         except json.JSONDecodeError:
-                            # JSON 解析失败记录但不影响成功判定
+                            # 非 JSON 行：可能是 Codex CLI 的纯文本致命错误
+                            # （例如 Windows "os error 123" 非法路径），不要一律当噪声。
                             json_decode_errors += 1
                             err_message += "\n\n[json decode error] " + line
+                            if _looks_like_invalid_path_error(line):
+                                had_error = True
+                                error_kind = ErrorKind.INVALID_PATH
                             continue
 
                         except Exception as error:
@@ -687,6 +753,12 @@ async def codex_tool(
         success = True
 
         if had_error:
+            success = False
+
+        # 路径类错误优先：不要被后面的 protocol_missing_session 覆盖
+        path_error_already = error_kind == ErrorKind.INVALID_PATH
+        if not path_error_already and _looks_like_invalid_path_error(err_message):
+            error_kind = ErrorKind.INVALID_PATH
             success = False
 
         if thread_id is None:
@@ -776,6 +848,14 @@ async def codex_tool(
                 "\n"
                 "或使用 API Key 认证：\n"
                 "  printenv OPENAI_API_KEY | codex login --with-api-key\n"
+                "\n" + err_message
+            )
+        elif error_kind == ErrorKind.INVALID_PATH:
+            final_error = (
+                "工作目录路径非法（Windows 常见：cd 参数被包了字面引号，触发 os error 123）。\n"
+                f"已归一化路径：{cd_path}\n"
+                "正确写法：cd=C:/Users/you/project  或  cd=C:\\\\Users\\\\you\\\\project\n"
+                "错误写法：cd=\"C:/Users/you/project\"  （引号会成为路径的一部分）\n"
                 "\n" + err_message
             )
 

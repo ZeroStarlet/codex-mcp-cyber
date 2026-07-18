@@ -5,7 +5,7 @@
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | PROMPT | string | ✅ | 审核任务描述，必须包含 git diff 与完整审查清单 |
-| cd | Path | ✅ | 工作目录 |
+| cd | Path | ✅ | 工作目录。**不要加引号**：传 `C:/Users/you/repo`，不要传 `"C:/Users/you/repo"`。Windows 上字面引号会触发 `os error 123`。 |
 | sandbox | string | | **必须** `read-only` |
 | SESSION_ID | string | | 会话 ID——**初审必须 `""`（空），复审必须携带上一轮返回值** |
 | return_all_messages | boolean | | 返回完整消息历史，默认 False（仅用于调试） |
@@ -69,9 +69,22 @@
 | `upstream_error` | CLI 返回错误 |
 | `json_decode` | JSON 解析失败 |
 | `protocol_missing_session` | 未获取 SESSION_ID |
+| `invalid_path` | 工作目录非法 / 不存在（常见：`cd` 被包了字面引号 → Windows `os error 123`） |
 | `empty_result` | 无响应内容 |
 | `subprocess_error` | 进程退出码非零 |
 | `unexpected_exception` | 未预期异常 |
+
+### Windows 路径注意
+
+历史上多次失败的真实形态是：
+
+```text
+cd = "\"C:/Users/Starlet/Desktop/sp_web_api\""   # 字符串内容含首尾引号
+→ Codex: Error: 文件名、目录名或卷标语法不正确。 (os error 123)
+→ 旧版包装层误报 protocol_missing_session
+```
+
+当前实现会自动剥掉包裹引号；仍请调用方传裸路径。若仍报 `invalid_path`，检查目录是否真实存在。
 
 ## 送审 PROMPT 模板
 
