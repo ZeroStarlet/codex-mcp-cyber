@@ -1,0 +1,23 @@
+{
+  "name": "codex-mcp-cyber",
+  "version": "0.2.0",
+  "description": "Claude 写码自测、Codex 只审不改的终审闭环 skill（cc-review）。配合 codex-mcp-cyber MCP 使用。",
+  "author": {
+    "name": "ZeroStarlet",
+    "url": "https://github.com/ZeroStarlet"
+  },
+  "homepage": "https://github.com/ZeroStarlet/codex-mcp-cyber",
+  "repository": "https://github.com/ZeroStarlet/codex-mcp-cyber",
+  "license": "MIT",
+  "keywords": [
+    "code-review",
+    "codex",
+    "claude",
+    "mcp",
+    "cc-review",
+    "engineering"
+  ],
+  "skills": [
+    "./skills/cc-review"
+  ]
+}

@@ -293,11 +293,14 @@ if ($DryRun) {
     Write-Host "  .\setup.ps1" -ForegroundColor White
 } else {
     Write-Host "`n============================================================" -ForegroundColor Green
-    Write-Success "codex-mcp-cyber setup completed!"
+    Write-Success "codex-mcp-cyber MCP setup completed!"
     Write-Host "============================================================`n" -ForegroundColor Green
 
     Write-Host "Next steps:" -ForegroundColor Cyan
     Write-Host "  1. Restart Claude Code CLI" -ForegroundColor White
-    Write-Host "  2. Verify: claude mcp list" -ForegroundColor White
+    Write-Host "  2. Verify MCP: claude mcp list" -ForegroundColor White
+    Write-Host "  3. Install the cc-review skill as a plugin (if not already):" -ForegroundColor White
+    Write-Host "       claude plugin marketplace add ZeroStarlet/codex-mcp-cyber" -ForegroundColor White
+    Write-Host "       claude plugin install codex-mcp-cyber@zerostarlet" -ForegroundColor White
 }
 Write-Host ""

@@ -1,33 +1,35 @@
 # Codex 工具详细规范
 
+PROMPT 正文与五项检查见 **[review-checklist.md](review-checklist.md)**（SSOT）。本文件只描述工具契约。
+
 ## 参数说明
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | PROMPT | string | ✅ | 审核任务描述，必须包含 git diff 与完整审查清单 |
-| cd | Path | ✅ | 工作目录。**不要加引号**：传 `C:/Users/you/repo`，不要传 `"C:/Users/you/repo"`。Windows 上字面引号会触发 `os error 123`。 |
+| cd | string | ✅ | 工作目录**裸路径字符串**（勿加引号；注解为 str 避免空串变成 Path('.')） |
 | sandbox | string | | **必须** `read-only` |
-| SESSION_ID | string | | 会话 ID——**初审必须 `""`（空），复审必须携带上一轮返回值** |
-| return_all_messages | boolean | | 返回完整消息历史，默认 False（仅用于调试） |
-| return_metrics | boolean | | 返回值中包含指标数据，默认 False |
+| SESSION_ID | string | | **初审必须 `""`，复审必须携带上一轮返回值** |
+| return_all_messages | boolean | | 返回完整消息历史，默认 False（仅调试） |
+| return_metrics | boolean | | 返回值中包含指标，默认 False |
 | image | List[Path] | | 附加图片 |
 | model | string | | 指定模型 |
-| timeout | int | | 空闲超时（秒），默认 300，无输出超过此时间触发 |
-| max_duration | int | | 总时长硬上限（秒），默认 1800（30 分钟），0 表示无限制 |
-| max_retries | int | | 最大重试次数，默认 1（可安全重试） |
-| log_metrics | boolean | | 将指标输出到 stderr |
-| skip_git_repo_check | bool | | 允许在非 Git 仓库中运行，默认 True |
-| yolo | bool | | 无需审批运行所有命令（跳过沙箱），默认 False。**慎用** |
-| profile | string | | 从 `~/.codex/config.toml` 加载的配置文件名称，默认 `""` |
+| timeout | int | | 空闲超时（秒），默认 300 |
+| max_duration | int | | 总时长硬上限（秒），默认 1800；0 = 无限制 |
+| max_retries | int | | 最大重试次数，默认 1 |
+| log_metrics | boolean | | 指标输出到 stderr |
+| skip_git_repo_check | bool | | 允许非 Git 仓库，默认 True |
+| yolo | bool | | 跳过沙箱审批，默认 False。**慎用** |
+| profile | string | | `~/.codex/config.toml` 配置名，默认 `""` |
 
-### SESSION_ID 规则（强制）
+### SESSION_ID 规则
 
-| 场景 | SESSION_ID | 原因 |
-|------|-----------|------|
-| **初审**（初次送审） | `""` 或不传 | 干净上下文，无历史干扰 |
-| **复审**（修复后再次送审） | 上一轮返回的 `SESSION_ID` | 保留初审意见，复审更连贯 |
-| **新功能 / 无关改动** | `""` | 不应混入不相干的审查上下文 |
-| **会话丢失**（崩溃 / 重启 / 上下文溢出） | `""` 并附初审摘要 | 开新会话，在 PROMPT 中补充上一轮审查结论摘要作为上下文补偿 |
+| 场景 | SESSION_ID |
+|------|------------|
+| 初审 | `""` 或不传 |
+| 复审 | 上一轮返回值 |
+| 新功能 / 无关改动 | `""` |
+| 会话丢失 | `""` + PROMPT 附初审摘要 |
 
 ## 返回值
 
@@ -40,7 +42,7 @@
   "result": "Codex 审核结论"
 }
 
-// 失败（结构化错误）
+// 失败
 {
   "success": false,
   "tool": "codex",
@@ -58,85 +60,50 @@
 }
 ```
 
-### error_kind 枚举
+### error_kind
 
 | 值 | 说明 |
 |----|------|
 | `idle_timeout` | 空闲超时（无输出） |
 | `timeout` | 总时长超时 |
 | `command_not_found` | codex CLI 未安装 |
-| `auth_required` | 未登录或认证过期，需运行 `codex login` |
+| `auth_required` | 未登录或认证过期 → `codex login` |
 | `upstream_error` | CLI 返回错误 |
 | `json_decode` | JSON 解析失败 |
 | `protocol_missing_session` | 未获取 SESSION_ID |
-| `invalid_path` | 工作目录非法 / 不存在（常见：`cd` 被包了字面引号 → Windows `os error 123`） |
+| `invalid_path` | 工作目录非法（常见：`cd` 带字面引号 → `os error 123`） |
 | `empty_result` | 无响应内容 |
 | `subprocess_error` | 进程退出码非零 |
 | `unexpected_exception` | 未预期异常 |
 
-### Windows 路径注意
+### Windows 路径 / os error 123
 
-历史上多次失败的真实形态是：
+历史上两类失败：
 
-```text
-cd = "\"C:/Users/Starlet/Desktop/sp_web_api\""   # 字符串内容含首尾引号
-→ Codex: Error: 文件名、目录名或卷标语法不正确。 (os error 123)
-→ 旧版包装层误报 protocol_missing_session
-```
+1. **MCP 入参 `cd` 带字面引号**
+   `cd = "\"C:/Users/you/repo\""` → 旧版误报 `protocol_missing_session`。
+   包装层会剥包裹引号 / `file://` / 弯引号；调用方仍应传裸路径。
 
-当前实现会自动剥掉包裹引号；仍请调用方传裸路径。若仍报 `invalid_path`，检查目录是否真实存在。
+2. **中文 / 非 ASCII 工作目录下，Codex 内部工具触发 123**
+   即使 `--cd` 合法，子工具解析路径仍可能失败（本机 8.3 short path 常被禁用）。
+   包装层在 Windows 上会为非 ASCII 目录自动建 **ASCII 目录联接**
+   （每用户独立：`C:/codex-mcp-cyber-v3-<sidhash>/wd-junctions/<path-hash>/`，不经 cmd），并：
+   - 把 `codex exec --cd` 指到联接路径
+   - 把 Popen `cwd` 设为同一联接
 
-## 送审 PROMPT 模板
+   若联接创建失败则回退真实路径。仍 123 时，最稳妥是把仓库放到纯英文路径。
 
-调用前先取 diff 并嵌入 PROMPT，让 Codex 精准审变更而非自行探索文件（省 token、更准）：
-
-```bash
-git diff --no-color   # Claude 在调用 Codex 前执行
-```
-
-唯一模板。**审查清单必须完整携带**（Codex 工具无内置审查 system prompt，清单不可省略）。`**本次重点**` 字段用于标注该次审查应优先关注的高风险面。
-
-> **发送前校验**：所有 `[方括号占位符]` 必须替换为实际内容再发送。切勿将字面占位符文本（如 `[文件列表]`、`[粘贴 git diff --no-color 输出]`）发送给 Codex——这会导致审查无实际内容、返回误报 PASS。
-
-````
-请 review 以下代码改动（只审不改）：
-
-**改动文件**：[文件列表]
-**改动目的**：[简要描述]
-**本次重点**：[如：鉴权边界 / 并发竞态 / 输入校验 / 是否引入回归 —— 没有可省略]
-
-**Git Diff**:
-```diff
-[粘贴 git diff --no-color 输出]
-```
-
-**请检查**：
-1. 逻辑正确性
-2. 边界条件（空值 / 越界 / 非法输入 / 溢出）
-3. 安全风险（注入 / 越权 / 凭证泄漏 / 敏感信息泄露）
-4. 测试缺口（缺少断言 / 未覆盖边界 / 回归缺失）
-5. 可维护性（命名 / 结构 / 重复代码 / 过度抽象）
-
-**请给出明确结论**：
-- ✅ PASS：代码质量良好，可以合入
-- ⚠️ OPTIMIZE：有优化建议但不阻塞合入，由 Claude 评估是否采纳
-- ❌ CHANGE：必须修改，以下为具体问题清单
-````
+若报 `invalid_path`：检查目录是否存在、是否仍含引号、是否非 ASCII。
 
 ## 使用规范
 
-1. **严格边界**：必须 `sandbox="read-only"`，Codex 严禁修改代码
-2. **SESSION_ID 纪律**：初审传 `""`，复审传上一轮返回值；新功能开新会话
-3. 检查 `success` 字段判断审核是否成功
-4. 从 `result` 字段获取审核结论（✅ PASS / ⚠️ OPTIMIZE / ❌ CHANGE）
-5. 失败时检查 `error_kind` 了解失败原因
+1. **只审不改**：`sandbox="read-only"`
+2. **SESSION_ID 纪律**：初审 `""`，复审复用；新功能开新会话
+3. 查 `success`；从 `result` 取 ✅ / ⚠️ / ❌
+4. 失败查 `error_kind`；处理见 [scenarios.md](scenarios.md) F
 
 ## 重试策略
 
-Codex 默认允许 **1 次自动重试**（只读操作无副作用）：
-- 超时、网络错误等会自动重试（最多 1 次，退避间隔约 0.5s）
-- `command_not_found` / `auth_required` 不会重试（需用户干预）
-
-工具层面重试与流程层面重试（3 轮往返上限）互不冲突：
-- 工具重试：单次 `codex` 调用因网络 / 超时自动重试 1 次，对 Claude 透明
-- 流程重试：Codex 返回 ❌ CHANGE → Claude 修复 → 再次调用 codex 复审，最多 3 轮
+- 工具默认 **1 次**自动重试（只读无副作用）：超时 / 网络等
+- `command_not_found` / `auth_required` **不重试**
+- 与流程 **3 轮闸** 互不冲突：工具重试是单次调用；流程重试是 ❌ → 修 → 再审

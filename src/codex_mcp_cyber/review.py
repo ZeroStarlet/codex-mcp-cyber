@@ -14,9 +14,13 @@ from typing import Any, Dict, List, Literal, Optional
 from codex_mcp_cyber.errors import (
     CommandNotFoundError,
     ErrorKind,
+    InvalidWorkdirError,
     build_error_detail,
+    format_cli_path,
     is_retryable_error,
+    looks_like_invalid_path_error,
     normalize_workdir,
+    prefer_codex_workdir,
 )
 from codex_mcp_cyber.process import CodexProcessRunner, PopenCodexRunner
 from codex_mcp_cyber.stream import finalize_stream_outcome, reduce_codex_stream
@@ -164,10 +168,13 @@ def _display_error(result: ReviewResult) -> str:
             f"已归一化路径：{result.workdir}\n" if result.workdir is not None else ""
         )
         return (
-            "工作目录路径非法（Windows 常见：cd 参数被包了字面引号，触发 os error 123）。\n"
+            "工作目录路径非法或 Codex 在访问路径时触发 Windows os error 123。\n"
             f"{path_line}"
-            "正确写法：cd=C:/Users/you/project  或  cd=C:\\\\Users\\\\you\\\\project\n"
-            '错误写法：cd="C:/Users/you/project"  （引号会成为路径的一部分）\n'
+            "常见原因：\n"
+            "1) cd 被包了字面引号（应传裸路径：C:/Users/you/project）\n"
+            "2) 中文/非 ASCII 路径下 Codex 内部工具解析失败"
+            "（本工具会尝试建 ASCII 目录联接；若仍失败，请把仓库放到纯英文路径）\n"
+            "3) 路径不存在或含非法尾部空格/点\n"
             "\n" + raw
         )
     return raw
@@ -202,14 +209,29 @@ def to_wire(result: ReviewResult) -> Dict[str, Any]:
 
 
 def _build_cmd(req: ReviewRequest, cd_path: Path) -> list[str]:
-    cmd = ["codex", "exec", "--sandbox", req.sandbox, "--cd", str(cd_path), "--json"]
+    # list argv：路径本身不再包引号；format_cli_path 保证 Windows 原生形态。
+    cmd = [
+        "codex",
+        "exec",
+        "--sandbox",
+        req.sandbox,
+        "--cd",
+        format_cli_path(cd_path),
+        "--json",
+    ]
     image_list = (
         req.image
         if isinstance(req.image, list)
         else ([req.image] if isinstance(req.image, (str, Path)) else [])
     )
     if image_list:
-        cmd.extend(["--image", ",".join(str(p) for p in image_list)])
+        # 相对图片路径相对审核目录（codex_cd），不是 MCP 服务 cwd
+        cmd.extend(
+            [
+                "--image",
+                ",".join(format_cli_path(Path(p), base=cd_path) for p in image_list),
+            ]
+        )
     if req.model:
         cmd.extend(["--model", req.model])
     if req.profile:
@@ -320,10 +342,28 @@ async def run_review(
     sleep_fn: SleepFn = sleep or asyncio.sleep
     active_runner: CodexProcessRunner = runner or PopenCodexRunner()
 
-    cd_path = normalize_workdir(req.cd)
-    if not cd_path.exists():
+    # 1) 剥引号 / file URI / 严格归一
+    # 2) 必须是已存在的目录
+    # 3) 交给 Codex 时优先 ASCII 联接别名（Windows 中文路径防 123）
+    try:
+        cd_path = normalize_workdir(req.cd)
+    except InvalidWorkdirError as e:
+        msg = f"{e}\n（原始输入：{req.cd!r}）"
+        return _finish(
+            req,
+            ts_start,
+            ReviewResult(
+                success=False,
+                error_kind=ErrorKind.INVALID_PATH,
+                error_message=msg,
+                error_detail=build_error_detail(msg),
+            ),
+            retries=0,
+        )
+
+    if not cd_path.is_dir():
         msg = (
-            f"工作目录不存在或路径非法：{cd_path}\n"
+            f"工作目录不存在或不是目录：{cd_path}\n"
             f"（原始输入：{req.cd!r}）"
         )
         return _finish(
@@ -339,7 +379,11 @@ async def run_review(
             retries=0,
         )
 
-    cmd = _build_cmd(req, cd_path)
+    codex_cd = prefer_codex_workdir(cd_path)
+    cmd = _build_cmd(req, codex_cd)
+    # Popen 也设 cwd，让 Codex 子工具的相对路径解析落在同一目录（ASCII 联接时尤其重要）
+    if isinstance(active_runner, PopenCodexRunner):
+        active_runner.workdir = codex_cd
     max_retries = max(0, req.max_retries)
     retries = 0
     last: _AttemptOutcome | None = None
@@ -363,6 +407,39 @@ async def run_review(
                     error_kind=ErrorKind.COMMAND_NOT_FOUND,
                     error_message=str(e),
                     error_detail=build_error_detail(str(e)),
+                    workdir=cd_path,
+                ),
+                retries=retries,
+            )
+        except OSError as e:
+            # Popen cwd 非法 / WinError 123 / 267 等：收成 invalid_path 或 subprocess_error
+            err_text = str(e)
+            winerr = getattr(e, "winerror", None)
+            errno = getattr(e, "errno", None)
+            # 123 = ERROR_INVALID_NAME, 267 = ERROR_DIRECTORY, 3 = ERROR_PATH_NOT_FOUND
+            # 2 = ERROR_FILE_NOT_FOUND（cwd 丢失时也可能）
+            pathish = winerr in (2, 3, 123, 161, 206, 267) or errno in (
+                2,
+                3,
+                123,
+                161,
+                206,
+                267,
+            )
+            kind = (
+                ErrorKind.INVALID_PATH
+                if looks_like_invalid_path_error(err_text) or pathish
+                else ErrorKind.SUBPROCESS_ERROR
+            )
+            msg = f"启动 Codex 进程失败：{err_text}"
+            return _finish(
+                req,
+                ts_start,
+                ReviewResult(
+                    success=False,
+                    error_kind=kind,
+                    error_message=msg,
+                    error_detail=build_error_detail(msg),
                     workdir=cd_path,
                 ),
                 retries=retries,

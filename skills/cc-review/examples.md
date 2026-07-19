@@ -1,285 +1,113 @@
 # 使用案例
 
-> 统一前提：**代码全部由 Claude 自己写并自测**，Codex 只做独立终审（read-only，只审不改）。
->
-> **发送前校验**：所有 `[方括号占位符]` 和 `<尖括号占位符>` 必须替换为实际内容再发送。切勿将字面占位符文本发送给 Codex。
->
-> **`cd` 不要加引号**：传裸路径，如 `C:/Users/you/repo` 或 `/project`；不要传 `"C:/Users/you/repo"`。Windows 上字面引号会触发 `os error 123`（`invalid_path`）。
+> **前提**：代码由 Claude 写并自测；Codex **只审不改**（`sandbox="read-only"`）。
+> **PROMPT 全文**只在 [review-checklist.md](review-checklist.md)。下方只写各场景的**差异字段**与调用要点。
+> **`cd`**：裸路径，如 `C:/Users/you/repo` 或 `/project`。
 
 ---
 
-## 案例 1：新功能
+## 1. 新功能
 
-**场景**：实现一组用户管理 REST API。
+**场景**：用户管理 REST API。
+**要点**：可独立验证单元完成后初审；验收写进「改动目的」。
 
-**流程**：
-1. Claude 拆解需求，列出接口清单与影响文件。
-2. Claude 直接写代码并自测（本地跑通 / 跑测试）。
-3. 完成这一可独立验证的单元后，取 `git diff` 送 Codex 审查。
-4. 按 Codex 清单逐条修复，复用同一会话复审，直至 ✅ PASS。
-
-**Codex 调用示例**：
-````
-PROMPT: 请 review 以下代码改动（只审不改）：
-
-**改动文件**：src/api/users.py, src/api/schemas.py, tests/test_users.py
-**改动目的**：新增 GET/POST /users、GET /users/{id}，支持分页与过滤
-**本次重点**：分页边界（空结果 / 越界页码）、输入校验、权限控制
-
-**Git Diff**:
-```diff
-<粘贴 git diff --no-color 输出>
-```
-
-**请检查**：
-1. 逻辑正确性
-2. 边界条件（空值 / 越界 / 非法输入 / 溢出）
-3. 安全风险（注入 / 越权 / 凭证泄漏 / 敏感信息泄露）
-4. 测试缺口（缺少断言 / 未覆盖边界 / 回归缺失）
-5. 可维护性（命名 / 结构 / 重复代码 / 过度抽象）
-
-**请给出明确结论**：
-- ✅ PASS：代码质量良好，可以合入
-- ⚠️ OPTIMIZE：有优化建议但不阻塞合入，由 Claude 评估是否采纳
-- ❌ CHANGE：必须修改，以下为具体问题清单
-
-cd: /project
-sandbox: read-only
-SESSION_ID: ""   # 初审：干净会话
-````
+| 字段 | 值 |
+|------|-----|
+| 改动文件 | `src/api/users.py`, `src/api/schemas.py`, `tests/test_users.py` |
+| 改动目的 | 新增 GET/POST /users、GET /users/{id}，分页与过滤 |
+| 本次重点 | 分页边界（空结果 / 越界页码）、输入校验、权限 |
+| SESSION_ID | `""`（初审） |
 
 ---
 
-## 案例 2：Bug 修复
+## 2. Bug 修复 + 复审
 
-**场景**：登录 token 过期后未刷新，导致用户在会话中突然被踢出。
+**场景**：token 过期未刷新导致被踢。
+**要点**：补回归测试；复审复用 SESSION_ID。
 
-**流程**：
-1. Claude 定位根因：token 刷新逻辑未在过期前触发。
-2. 写修复并补充回归测试（过期场景 + 边界时间戳），自测通过。
-3. 送 Codex 审查修复是否到位、有无引入新问题。
-4. ❌ → 逐条修复 → 复审（复用 SESSION_ID）；⚠️ → 评估建议后决定是否修复，必要时复审。同一问题最多 3 轮往返，仍卡住则抛人工裁决。
+**初审**
 
-**Codex 调用示例（初审）**：
-````
-PROMPT: 请 review 以下代码改动（只审不改）：
+| 字段 | 值 |
+|------|-----|
+| 改动文件 | `src/auth/login.py`, `src/auth/token.py`, `tests/test_login.py` |
+| 改动目的 | 修复过期未刷新；补过期场景回归 |
+| 本次重点 | 并发刷新、刷新失败回退、时钟偏移、断言有效性 |
+| SESSION_ID | `""` |
 
-**改动文件**：src/auth/login.py, src/auth/token.py, tests/test_login.py
-**改动目的**：修复 token 过期未刷新导致意外登出；补充过期场景回归测试
-**本次重点**：刷新逻辑边界（并发刷新、刷新失败回退、时钟偏移）、安全（凭证泄漏）、测试断言是否有效
+**复审**（初审返回 `SESSION_ID=abc-123` 且 ❌ 后）
 
-**Git Diff**:
-```diff
-<粘贴 git diff 输出>
-```
-
-**请检查**：
-1. 逻辑正确性
-2. 边界条件（空值 / 越界 / 非法输入 / 溢出）
-3. 安全风险（注入 / 越权 / 凭证泄漏 / 敏感信息泄露）
-4. 测试缺口（缺少断言 / 未覆盖边界 / 回归缺失）
-5. 可维护性（命名 / 结构 / 重复代码 / 过度抽象）
-
-**请给出明确结论**：
-- ✅ PASS：代码质量良好，可以合入
-- ⚠️ OPTIMIZE：有优化建议但不阻塞合入，由 Claude 评估是否采纳
-- ❌ CHANGE：必须修改，以下为具体问题清单
-
-cd: /project
-sandbox: read-only
-SESSION_ID: ""   # 初审：干净会话
-````
-
-**复审调用示例**（Codex 返回 ❌ CHANGE 后）：
-````
-PROMPT: 请复审以下修复（只审不改）：
-
-**改动文件**：src/auth/token.py
-**改动目的**：根据初审意见修复并发刷新竞态条件；新增刷新互斥锁与失败回退
-**本次重点**：互斥锁是否正确释放（含异常路径）、回退是否覆盖所有刷新失败分支
-
-**Git Diff**:
-```diff
-<粘贴新的 git diff 输出>
-```
-
-**请检查**：
-1. 逻辑正确性
-2. 边界条件（空值 / 越界 / 非法输入 / 溢出）
-3. 安全风险（注入 / 越权 / 凭证泄漏 / 敏感信息泄露）
-4. 测试缺口（缺少断言 / 未覆盖边界 / 回归缺失）
-5. 可维护性（命名 / 结构 / 重复代码 / 过度抽象）
-
-**请给出明确结论**：
-- ✅ PASS：代码质量良好，可以合入
-- ⚠️ OPTIMIZE：有优化建议但不阻塞合入，由 Claude 评估是否采纳
-- ❌ CHANGE：必须修改，以下为具体问题清单
-
-cd: /project
-sandbox: read-only
-SESSION_ID: "abc-123"   # 复用初审会话，保留上下文
-````
+| 字段 | 值 |
+|------|-----|
+| 改动文件 | `src/auth/token.py` |
+| 改动目的 | 按初审修并发刷新竞态；互斥锁 + 失败回退 |
+| 本次重点 | 锁在异常路径是否释放；回退是否覆盖全部失败分支 |
+| SESSION_ID | `abc-123` |
 
 ---
 
-## 案例 3：关键模块强制送审 —— 支付写入
+## 3. 强制送审（支付回调）
 
-**场景**：改动涉及支付回调写入订单状态——属于强制送审范围（不可逆 + 级联影响）。
+**场景**：支付回调写订单状态（不可逆 + 级联）。
+**要点**：再小也必须送审；重点写高风险面。
 
-**要点**：
-- 即使改动很小（只加了一个字段），也**必须**送 Codex 审查，不得 Claude 自我放行。
-- 在 PROMPT 的「本次重点」中明确标注高风险面。
-- 必须复审到 ✅ PASS 才合入。
+| 字段 | 值 |
+|------|-----|
+| 改动文件 | `src/payment/callback.py`, `src/payment/models.py` |
+| 改动目的 | 回调新增退款状态字段，更新订单写入 |
+| 本次重点 | 不可逆写入、幂等（重复回调）、退款金额校验、级联库存 |
+| SESSION_ID | `""` |
 
-**Codex 调用示例**：
-````
-PROMPT: 请 review 以下代码改动（只审不改）：
-
-**改动文件**：src/payment/callback.py, src/payment/models.py
-**改动目的**：支付回调新增退款状态字段，更新订单状态写入逻辑
-**本次重点**：不可逆写入（订单状态变更不可回滚）、幂等性（重复回调）、退款金额校验、级联更新库存
-
-**Git Diff**:
-```diff
-<粘贴 git diff --no-color 输出>
-```
-
-**请检查**：
-1. 逻辑正确性
-2. 边界条件（空值 / 越界 / 非法输入 / 溢出）
-3. 安全风险（注入 / 越权 / 凭证泄漏 / 敏感信息泄露）
-4. 测试缺口（缺少断言 / 未覆盖边界 / 回归缺失）
-5. 可维护性（命名 / 结构 / 重复代码 / 过度抽象）
-
-**请给出明确结论**：
-- ✅ PASS：代码质量良好，可以合入
-- ⚠️ OPTIMIZE：有优化建议但不阻塞合入，由 Claude 评估是否采纳
-- ❌ CHANGE：必须修改，以下为具体问题清单
-
-cd: /project
-sandbox: read-only
-SESSION_ID: ""
-````
+原则表见 [critical-modules.md](critical-modules.md)。
 
 ---
 
-## 案例 4：重构
+## 4. 重构
 
-**场景**：将用户模块从单体 service 拆分为多个子模块，行为应完全不变。
+**场景**：单体 service 拆 query / command / validation，行为不变。
 
-**流程**：
-1. Claude 确认现有测试覆盖充分，先跑一遍确保全绿。
-2. 执行重构，只改结构不动行为。
-3. 重构后跑同一套测试，确认全绿。
-4. 送 Codex 审查，明确标注"纯重构"。
+| 字段 | 值 |
+|------|-----|
+| 改动文件 | `src/users/service.py` → `services/query.py`, `command.py`, `validation.py` |
+| 改动目的 | 纯重构，行为应完全不变 |
+| 本次重点 | 语义漂移、循环依赖、导入路径 |
+| SESSION_ID | `""` |
 
-**Codex 调用示例**：
-````
-PROMPT: 请 review 以下代码改动（只审不改）：
-
-**改动文件**：src/users/service.py（拆分为 src/users/services/query.py, command.py, validation.py）
-**改动目的**：纯重构——将单体 service 按职责拆分为 query / command / validation 三个子模块，行为应完全保持不变
-**本次重点**：语义漂移（拆分前后行为是否一致）、循环依赖、导入路径是否正确
-
-**Git Diff**:
-```diff
-<粘贴 git diff --no-color 输出>
-```
-
-**请检查**：
-1. 逻辑正确性
-2. 边界条件（空值 / 越界 / 非法输入 / 溢出）
-3. 安全风险（注入 / 越权 / 凭证泄漏 / 敏感信息泄露）
-4. 测试缺口（缺少断言 / 未覆盖边界 / 回归缺失）
-5. 可维护性（命名 / 结构 / 重复代码 / 过度抽象）
-
-**请给出明确结论**：
-- ✅ PASS：代码质量良好，可以合入
-- ⚠️ OPTIMIZE：有优化建议但不阻塞合入，由 Claude 评估是否采纳
-- ❌ CHANGE：必须修改，以下为具体问题清单
-
-cd: /project
-sandbox: read-only
-SESSION_ID: ""
-````
+重构前后同一套测试须全绿。
 
 ---
 
-## 案例 5：不认同 Codex 的 ❌
+## 5. 不认同 Codex 的 ❌
 
-**场景**：Codex 初审标记 ❌ CHANGE，认为某处缺少 nil 检查。Claude 判断该处上游已保证非 nil，加检查是死代码。
+**场景**：Codex 要求 nil 检查；Claude 有上游永非 nil 证据。
 
-**流程**：
-1. Claude 在复审 PROMPT 中说明分歧，附上游保证非 nil 的证据（代码引用 / 测试）。
-2. 若 Codex 复审仍坚持 ❌ —— 进入第 2 轮。
-3. 第 2 轮 Claude 补充更多证据或接受部分意见折中修改。
-4. 若第 3 轮仍 ❌ —— 抛人工裁决，附完整分歧记录。
+在标准 PROMPT 上**追加**：
 
-> **⚠️ OPTIMIZE 的分歧处理**：因为 ⚠️ 不阻塞合入，分歧时优先采纳 Claude 判断。若 Claude 认为建议不适用，在复审 PROMPT 中说明理由即可，不强制进入多轮往返。Codex 复审后仍坚持 ⚠️ 则直接合入，无需人工裁决。
-
-**复审调用示例**：
-````
-PROMPT: 请复审以下改动。关于初审提出的 nil 检查问题，我的分析如下（只审不改）：
-
-**改动文件**：src/orders/handler.go
-**改动目的**：补充订单创建逻辑
-**本次重点**：初审标记的 nil 检查争议——见下方分歧说明
-
+```text
 **与初审的分歧**：
-初审认为 `order.LineItems` 需 nil 检查。但 `LineItems` 由 `NewOrder()` 构造函数初始化，
-确保永不为 nil（见 src/orders/order.go:42 的 `LineItems: make([]LineItem, 0)`）。
-添加 nil 检查在此处是死代码，与 Karpathy 准则"不为不可能的场景加错误处理"相悖。
-同意初审的另一条意见（超时未设置），已在本次 diff 中修复。
-
-**Git Diff**:
-```diff
-<粘贴新的 git diff 输出>
+初审认为 order.LineItems 需 nil 检查。
+LineItems 由 NewOrder() 初始化为 make([]LineItem, 0)（order.go:42），永不为 nil。
+加检查是死代码，与「不为不可能场景加错误处理」相悖。
+同意另一条（超时未设置），已在本次 diff 修复。
 ```
 
-**请检查**：
-1. 逻辑正确性
-2. 边界条件（空值 / 越界 / 非法输入 / 溢出）
-3. 安全风险（注入 / 越权 / 凭证泄漏 / 敏感信息泄露）
-4. 测试缺口（缺少断言 / 未覆盖边界 / 回归缺失）
-5. 可维护性（命名 / 结构 / 重复代码 / 过度抽象）
-
-**请给出明确结论**：
-- ✅ PASS：代码质量良好，可以合入
-- ⚠️ OPTIMIZE：有优化建议但不阻塞合入，由 Claude 评估是否采纳
-- ❌ CHANGE：必须修改，以下为具体问题清单
-
-cd: /project
-sandbox: read-only
-SESSION_ID: "abc-123"   # 复用初审会话
-````
+| 字段 | 值 |
+|------|-----|
+| SESSION_ID | 复用初审 |
+| 处理 | 最多 3 轮；仍僵持 → 人工裁决（见 [scenarios.md](scenarios.md) E） |
 
 ---
 
-## 案例 6：工具不可用
+## 6. 工具不可用
 
-**场景**：调用 Codex 时返回 `command_not_found`——用户尚未安装 Codex CLI。
+**`command_not_found` / `auth_required`**：不重试；提示安装或 `codex login`。
+**其他错误**：工具重试 1 次；仍失败则写 `docs/pending-review-<date>.md`（diff + 意图），恢复后补审。
 
-**流程**：
-1. 工具返回 `success: false`，`error_kind: "command_not_found"`。
-2. Claude **不重试**，直接提示用户：
-   - "Codex CLI 未安装或未在 PATH 中。请运行 `codex login` 完成安装与登录。"
-3. 同时将当前 `git diff` 保存到 `docs/` 目录（若不存在则先创建），待 Codex 恢复后补审。
-
-**记录示例**（`docs/pending-review-2025-06-23.md`）：
-````markdown
+```markdown
 # 待补审：用户管理 API
-
-- **日期**：2025-06-23
-- **改动文件**：src/api/users.py, src/api/schemas.py
-- **改动目的**：新增 GET/POST /users、GET /users/{id}
-- **状态**：Codex CLI 未安装，待安装后补审
-
+- 日期：YYYY-MM-DD
+- 改动文件：…
+- 改动目的：…
+- 状态：Codex 不可用，待补审
 ## Diff
-```diff
-<粘贴 git diff 输出>
+（粘贴 git diff）
 ```
-````
-
-**其他错误（`timeout` / `upstream_error` 等）**：
-- 工具自动重试 1 次。
-- 若仍失败，同样记录 diff 到 `docs/`（若不存在则先创建），待恢复后补审。

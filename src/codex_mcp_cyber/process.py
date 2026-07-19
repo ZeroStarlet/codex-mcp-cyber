@@ -8,9 +8,10 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Literal, Optional, Protocol
 
-from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError
+from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError, format_cli_path
 
 Terminal = Literal["completed", "timeout", "idle_timeout"]
 
@@ -98,6 +99,9 @@ class PopenCodexRunner:
 
     对外 interface 仅 ``run(...) -> ProcessOutcome``（及 ``__init__`` 的谓词注入）。
     超时走 terminal，不 raise CommandTimeoutError。
+
+    ``workdir``：可选，设为 Popen 的 cwd，使 Codex 子工具相对路径解析落在审核目录
+   （Windows 中文路径场景下通常是 ASCII 目录联接）。
     """
 
     GRACEFUL_SHUTDOWN_DELAY = 0.3
@@ -105,8 +109,11 @@ class PopenCodexRunner:
     def __init__(
         self,
         is_terminal_line: Callable[[str], bool] | None = None,
+        *,
+        workdir: Path | str | None = None,
     ) -> None:
         self.is_terminal_line = is_terminal_line
+        self.workdir = workdir
 
     def run(
         self,
@@ -152,9 +159,13 @@ class PopenCodexRunner:
         return popen_cmd
 
     def _spawn(self, popen_cmd: list[str], *, prompt: str) -> subprocess.Popen[str]:
+        cwd: str | None = None
+        if self.workdir is not None:
+            cwd = format_cli_path(Path(self.workdir))
         process = subprocess.Popen(
             popen_cmd,
             shell=False,
+            cwd=cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

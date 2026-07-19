@@ -15,7 +15,9 @@ from codex_mcp_cyber.review import ReviewRequest, run_review, to_wire
 
 async def codex_tool(
     PROMPT: Annotated[str, "审核任务描述"],
-    cd: Annotated[Path, "工作目录"],
+    # 必须用 str：若注解为 Path，空串会被 Pydantic/FastMCP 变成 Path('.')，
+    # 静默落到 MCP 服务 cwd（安全/正确性问题）。
+    cd: Annotated[str, "工作目录（裸路径字符串，勿加引号）"],
     sandbox: Annotated[
         Literal["read-only", "workspace-write", "danger-full-access"],
         Field(description="沙箱策略，默认只读"),

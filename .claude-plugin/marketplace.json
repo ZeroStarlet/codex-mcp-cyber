@@ -1,0 +1,23 @@
+{
+  "name": "zerostarlet",
+  "owner": {
+    "name": "ZeroStarlet",
+    "url": "https://github.com/ZeroStarlet"
+  },
+  "description": "ZeroStarlet's Claude Code plugins — starting with codex-mcp-cyber (Claude + Codex review loop).",
+  "plugins": [
+    {
+      "name": "codex-mcp-cyber",
+      "source": "./",
+      "description": "Claude 写码、Codex 只审不改的终审闭环 skill（cc-review）。需另装 codex-mcp-cyber MCP 与 Codex CLI。",
+      "category": "engineering",
+      "keywords": [
+        "code-review",
+        "codex",
+        "claude",
+        "mcp",
+        "cc-review"
+      ]
+    }
+  ]
+}

@@ -259,9 +259,8 @@ async def test_missing_workdir_to_wire_has_invalid_path_guidance() -> None:
     assert "正确写法" not in (outcome.error_message or "")
     wire = to_wire(outcome)
     assert wire["error_kind"] == ErrorKind.INVALID_PATH
-    assert "正确写法" in wire["error"]
-    assert "os error 123" in wire["error"] or "字面引号" in wire["error"]
-
+    assert "os error 123" in wire["error"] or "字面引号" in wire["error"] or "非法" in wire["error"]
+    assert "常见原因" in wire["error"] or "字面引号" in wire["error"]
 @pytest.mark.asyncio
 async def test_metrics_and_all_messages_optional_on_wire(tmp_path: Path) -> None:
     runner = ScriptedLinesRunner(lines=_ok_lines("OK"), exit_code=0)

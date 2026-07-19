@@ -1,138 +1,95 @@
-# codex-mcp-cyber
-
 <div align="center">
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.12+-blue.svg)
-![MCP](https://img.shields.io/badge/MCP-1.20.0+-green.svg)
-![Status](https://img.shields.io/badge/status-beta-orange.svg)
+# codex-mcp-cyber
+
+**Claude 写码 · Codex 只读终审**
+
+审核 → 修复 → 复审，直到通过。
+
+<br/>
+
+[![License](https://img.shields.io/badge/license-MIT-0B5FFF?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![MCP](https://img.shields.io/badge/MCP-1.20.0+-10B981?style=flat-square)](https://modelcontextprotocol.io/)
+[![Status](https://img.shields.io/badge/status-beta-F59E0B?style=flat-square)](#)
+
+<br/>
 
 [English](README_EN.md)
-
-**Claude + Codex 代码审查 MCP 服务器**
-
-Claude 写代码，Codex 独立审核 + 复审，循环至通过。
-
-[快速开始](#-快速开始) • [核心特性](#-核心特性) • [架构](#-架构) • [工具详解](#️-工具详解) • [安装](#-安装)
+&nbsp;·&nbsp;
+[快速开始](#-快速开始)
+&nbsp;·&nbsp;
+[协作流程](#-协作流程)
+&nbsp;·&nbsp;
+[工具](#️-工具-codex)
+&nbsp;·&nbsp;
+[安装](#-安装)
 
 </div>
 
 ---
 
-## 🌟 核心特性
+## 为什么需要它
 
-| 维度 | 说明 |
-| :--- | :--- |
-| **🔍 独立审核** | Codex 作为唯一审核者，提供客观的第三方代码审查 |
-| **🔄 复审闭环** | 审核 → 修复 → 复审 → 循环，所有问题必须关闭 |
-| **🛡️ 安全只读** | Codex 默认 `read-only`，绝不修改代码 |
-| **⚡ 零配置** | 无需配置后端 API——Codex 使用自身认证体系 |
-| **📊 可观察性** | 支持指标采集（耗时、token 用量），JSONL 格式输出 |
+| 角色 | 职责 | 边界 |
+|:----:|:-----|:-----|
+| **Claude** | 需求分析 · 写码 · 自测 · 按意见修复 | 工程主体 |
+| **Codex** | 独立 Code Review，产出 ✅ / ⚠️ / ❌ | **只审不改**（`read-only`） |
 
-## 🤖 架构
-
-```
-Claude (Opus)  →  写代码、拆任务、做决策
-Codex (OpenAI) →  独立审核 + 复审（read-only）
-```
-
-Claude 自己写代码，不再委托子代理。Codex 是唯一审核者——初次审核和修复后复审全由 Codex 独立完成，Claude 不做初审。
-
-## 🛠️ 工具详解
-
-### codex
-
-调用 Codex CLI 进行代码审核。
-
-**参数：**
-
-| 参数 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| PROMPT | string | ✅ | - | 审核任务描述，建议包含 git diff |
-| cd | Path | ✅ | - | 工作目录 |
-| sandbox | string | - | `read-only` | 必须 read-only |
-| SESSION_ID | string | - | `""` | 会话复用 |
-| skip_git_repo_check | bool | - | `true` | 允许非 Git 仓库 |
-| timeout | int | - | `300` | 空闲超时秒数 |
-| max_duration | int | - | `1800` | 总时长上限秒数 |
-| max_retries | int | - | `1` | 最大重试次数 |
-| model | string | - | `""` | 指定模型 |
-
-**返回值：**
-
-```json
-// ✅ 通过
-{
-  "success": true,
-  "tool": "codex",
-  "SESSION_ID": "uuid-string",
-  "result": "Codex 审核结论"
-}
-
-// ❌ 需要修改
-{
-  "success": false,
-  "error": "错误摘要",
-  "error_kind": "timeout | command_not_found | upstream_error | ...",
-  "error_detail": {
-    "message": "错误简述",
-    "exit_code": 1,
-    "last_lines": ["最后20行输出..."],
-    "retries": 1
-  }
-}
+```mermaid
+flowchart LR
+  A[Claude 写码自测] --> B[git diff]
+  B --> C[Codex 只读终审]
+  C -->|❌ CHANGE| D[Claude 逐条修复]
+  D --> E[复审 · 复用 SESSION_ID]
+  E -->|仍 ❌| D
+  E -->|✅ PASS| F[合入 / 提交]
+  C -->|✅ / ⚠️| F
 ```
 
-**error_kind 枚举：**
+> 复审必须复用同一 `SESSION_ID`；同一改动最多 **3 轮**，否则抛人工裁决。
 
-| 值 | 说明 |
-|----|------|
-| `idle_timeout` | 空闲超时（无输出） |
-| `timeout` | 总时长超时 |
-| `command_not_found` | codex CLI 未安装 |
-| `auth_required` | 未登录或认证过期 |
-| `invalid_path` | 工作目录非法 / 不存在（常见：`cd` 带字面引号 → Windows `os error 123`） |
-| `upstream_error` | CLI 返回错误 |
-| `json_decode` | JSON 解析失败 |
-| `protocol_missing_session` | 未获取 SESSION_ID |
-| `empty_result` | 无响应内容 |
-| `unexpected_exception` | 未预期异常 |
+### 两件套
 
-### 重试策略
+| 组件 | 作用 | 怎么装 |
+|:-----|:-----|:-------|
+| 🔌 **插件** `codex-mcp-cyber@zerostarlet` | `cc-review` skill（协作闭环） | Claude Code plugin |
+| 🧰 **MCP** `codex-mcp-cyber` | `codex` 工具（调本机 Codex CLI） | setup / `claude mcp add` |
 
-- 默认 **1 次自动重试**（只读操作无副作用）
-- 超时、网络错误会自动重试
-- `command_not_found` 不重试（需用户安装 codex CLI）
-- 指数退避：0.5s → 1s → 2s
+本机还需 **Codex CLI**：
 
-## 📋 协作流程
+```bash
+npm i -g @openai/codex && codex login
+```
 
-1. Claude 分析需求，执行代码改动
-2. 改动完成后 Claude 获取变更摘要：
+---
 
-   ```bash
-   git diff --no-color
-   ```
+## 🚀 快速开始
 
-3. Claude 调用 `codex` 工具，将 diff 嵌入 PROMPT
-4. **Codex 独立审核**，返回结论：✅ 通过 / ⚠️ 建议优化 / ❌ 需要修改
-5. ❌ / ⚠️ → Claude 修复问题 → **Codex 复审** → 循环直到 ✅
-6. ✅ → 合入 / 提交
+### ① 安装 skill 插件
 
-> 详细工作流见 [`skills/cc-review/SKILL.md`](skills/cc-review/SKILL.md)
+```bash
+claude plugin marketplace add ZeroStarlet/codex-mcp-cyber
+claude plugin install codex-mcp-cyber@zerostarlet
+```
 
-## 🔧 安装
+<details>
+<summary><b>本地仓库调试插件</b></summary>
 
-### 前置条件
+```bash
+claude plugin marketplace add /path/to/codex-mcp-cyber
+claude plugin install codex-mcp-cyber@zerostarlet
+```
 
-- **Python 3.12+**
-- **uv**（Python 包管理器）— `pip install uv`
-- **Claude Code CLI** — `npm install -g @anthropic-ai/claude-code`
-- **Codex CLI** — `npm install -g @openai/codex`
+</details>
 
-### 一键安装
+### ② 安装 MCP
 
-**Windows：**
+<table>
+<tr>
+<td width="50%">
+
+**Windows**
 
 ```powershell
 git clone https://github.com/ZeroStarlet/codex-mcp-cyber.git
@@ -140,7 +97,10 @@ cd codex-mcp-cyber
 .\setup.bat
 ```
 
-**macOS / Linux：**
+</td>
+<td width="50%">
+
+**macOS / Linux**
 
 ```bash
 git clone https://github.com/ZeroStarlet/codex-mcp-cyber.git
@@ -148,56 +108,140 @@ cd codex-mcp-cyber
 chmod +x setup.sh && ./setup.sh
 ```
 
-### 手动安装
+</td>
+</tr>
+</table>
+
+### ③ 验证
+
+1. 重启 **Claude Code**
+2. `claude mcp list` → 出现 `codex-mcp-cyber`
+3. skill 列表 → 出现 **`cc-review`**
+
+---
+
+## 📋 协作流程
+
+推荐使用插件 skill **`cc-review`**：
+
+| 步骤 | 动作 |
+|:----:|:-----|
+| **1** | Claude 拆需求、写码、自测 |
+| **2** | `git diff --no-color`，按 [审查清单](skills/cc-review/review-checklist.md) 组 PROMPT |
+| **3** | 调用 `codex` · `sandbox=read-only` · 初审 `SESSION_ID=""` |
+| **4** | Codex → ✅ 通过 · ⚠️ 可合入建议 · ❌ 必须改 |
+| **5** | ❌ → 逐条修 → **复审复用 `SESSION_ID`** → 最多 3 轮 |
+| **6** | ✅ → 合入 / 提交 |
+
+完整规则（含强制送审）：[`skills/cc-review/SKILL.md`](skills/cc-review/SKILL.md)
+
+---
+
+## 🛠️ 工具 `codex`
+
+调用本机 Codex CLI，**默认且建议始终只读**。
+
+### 参数
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|:-----|:-----|:----:|:-----|:-----|
+| `PROMPT` | string | ✅ | — | 须含 **diff + 完整审查清单** |
+| `cd` | string | ✅ | — | 工作目录 **裸路径**（勿加引号） |
+| `sandbox` | string | | `read-only` | 审核场景必须只读 |
+| `SESSION_ID` | string | | `""` | 初审空；复审传上一轮返回值 |
+| `timeout` | int | | `300` | 空闲超时（秒） |
+| `max_duration` | int | | `1800` | 总时长上限（秒） |
+| `max_retries` | int | | `1` | 工具层自动重试 |
+
+### 返回
+
+| 成功 | 失败 |
+|:-----|:-----|
+| `success` · `SESSION_ID` · `result` | `error` · `error_kind` · `error_detail` |
+
+`error_kind` 常见值：`auth_required` · `invalid_path` · `command_not_found` · `timeout` / `idle_timeout` · `upstream_error`
+
+完整契约 → [`codex-guide.md`](skills/cc-review/codex-guide.md)
+
+> **Windows**  
+> `cd` 不要包字面引号。中文 / 非 ASCII 路径下，MCP 会尝试建立 ASCII 目录联接，降低 Codex 内部 `os error 123`。
+
+---
+
+## 📦 安装
+
+### 前置条件
+
+| 依赖 | 说明 |
+|:-----|:-----|
+| Python | **3.12+** |
+| uv | [astral.sh/uv](https://github.com/astral-sh/uv) |
+| Claude Code CLI | `npm i -g @anthropic-ai/claude-code` |
+| Codex CLI | `npm i -g @openai/codex` → `codex login` |
+
+<details>
+<summary><b>MCP 手动安装（远程 / 本地开发）</b></summary>
 
 ```bash
-# 1. 克隆
 git clone https://github.com/ZeroStarlet/codex-mcp-cyber.git
 cd codex-mcp-cyber
-
-# 2. 安装依赖
 uv sync
 
-# 3. 注册 MCP 服务器（远程安装，自动获取最新版）
-claude mcp add codex-mcp-cyber --scope user --transport stdio -- uvx --from git+https://github.com/ZeroStarlet/codex-mcp-cyber.git codex-mcp-cyber
+# 远程（自动拉最新）
+claude mcp add codex-mcp-cyber --scope user --transport stdio -- \
+  uvx --from git+https://github.com/ZeroStarlet/codex-mcp-cyber.git codex-mcp-cyber
 
-# 或者本地安装（开发调试用）
-claude mcp add codex-mcp-cyber --scope user --transport stdio -- uv run --directory . codex-mcp-cyber
+# 本地开发
+claude mcp add codex-mcp-cyber --scope user --transport stdio -- \
+  uv run --directory . codex-mcp-cyber
 ```
 
-### 卸载
+</details>
 
-**Windows：** `.\uninstall.bat`
+<details>
+<summary><b>卸载</b></summary>
 
-**macOS / Linux：** `chmod +x uninstall.sh && ./uninstall.sh`
+| 组件 | 命令 |
+|:-----|:-----|
+| MCP · Windows | `.\uninstall.bat` |
+| MCP · Unix | `./uninstall.sh` |
+| MCP · 手动 | `claude mcp remove codex-mcp-cyber --scope user` |
+| 插件 | `claude plugin uninstall codex-mcp-cyber@zerostarlet` |
 
-或手动执行：
+skill **只通过插件**分发，不要拷到 `~/.claude/skills/cc-review`（会与插件双载）。
 
-```bash
-claude mcp remove codex-mcp-cyber --scope user
-```
+</details>
+
+---
 
 ## 🧑‍💻 开发
 
 ```bash
 git clone https://github.com/ZeroStarlet/codex-mcp-cyber.git
 cd codex-mcp-cyber
-
-# 安装依赖
 uv sync
-
-# 本地调试运行
 uv run codex-mcp-cyber
 ```
 
-## 📚 参考资源
-
-- **Claude Code**: [Documentation](https://docs.anthropic.com/en/docs/claude-code)
-- **Codex CLI**: [Documentation](https://developers.openai.com/codex/quickstart)
-- **FastMCP**: [GitHub](https://github.com/jlowin/fastmcp) - MCP 框架
-
-## 📄 License
-
-MIT
+| 文档 | 内容 |
+|:-----|:-----|
+| [`CONTEXT.md`](CONTEXT.md) | 领域词 |
+| [`skills/cc-review/`](skills/cc-review/) | 协作 skill 源码 |
 
 ---
+
+<div align="center">
+
+### 参考
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+&nbsp;·&nbsp;
+[Codex CLI](https://developers.openai.com/codex/quickstart)
+&nbsp;·&nbsp;
+[FastMCP](https://github.com/jlowin/fastmcp)
+
+<br/>
+
+**MIT License**
+
+</div>
