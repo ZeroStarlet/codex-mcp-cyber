@@ -28,70 +28,22 @@ class ProcessOutcome:
 
 
 class CodexProcessRunner(Protocol):
-    """行流 seam：执行命令并产出 ProcessOutcome（含 timeout terminal）。"""
+    """行流 seam：执行命令并产出 ProcessOutcome（含 timeout terminal）。
+
+    ``workdir``：子进程工作目录；None 表示继承当前进程目录。
+    它属于 interface 而非某个具体 adapter 的字段 —— 否则调用方得先
+    isinstance 认出具体 adapter 才能传，其余 adapter 会静默收不到。
+    """
 
     def run(
         self,
         cmd: list[str],
         *,
         prompt: str,
+        workdir: Path | str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome: ...
-
-
-@dataclass
-class ScriptedLinesRunner:
-    """测试 adapter：回放固定行序列，不碰 OS。"""
-
-    lines: list[str]
-    exit_code: Optional[int] = 0
-    terminal: Terminal = "completed"
-    error_message: str = ""
-    calls: int = 0
-
-    def run(
-        self,
-        cmd: list[str],
-        *,
-        prompt: str,
-        timeout: int,
-        max_duration: int,
-    ) -> ProcessOutcome:
-        del cmd, prompt, timeout, max_duration
-        self.calls += 1
-        lines = list(self.lines)
-        raw = sum(1 for line in lines if line)
-        return ProcessOutcome(
-            lines=lines,
-            exit_code=self.exit_code,
-            raw_output_lines=raw,
-            terminal=self.terminal,
-            error_message=self.error_message,
-        )
-
-
-@dataclass
-class SequenceRunner:
-    """测试 adapter：按调用次序返回不同 ProcessOutcome。"""
-
-    steps: list[ProcessOutcome]
-    calls: int = 0
-
-    def run(
-        self,
-        cmd: list[str],
-        *,
-        prompt: str,
-        timeout: int,
-        max_duration: int,
-    ) -> ProcessOutcome:
-        del cmd, prompt, timeout, max_duration
-        if self.calls >= len(self.steps):
-            raise RuntimeError("SequenceRunner exhausted")
-        step = self.steps[self.calls]
-        self.calls += 1
-        return step
 
 
 class PopenCodexRunner:
@@ -100,8 +52,8 @@ class PopenCodexRunner:
     对外 interface 仅 ``run(...) -> ProcessOutcome``（及 ``__init__`` 的谓词注入）。
     超时走 terminal，不 raise CommandTimeoutError。
 
-    ``workdir``：可选，设为 Popen 的 cwd，使 Codex 子工具相对路径解析落在审核目录
-   （Windows 中文路径场景下通常是 ASCII 目录联接）。
+    ``workdir`` 经 ``run(...)`` 传入并设为 Popen 的 cwd，使 Codex 子工具的相对路径
+    解析落在审核目录（Windows 中文路径场景下通常是 ASCII 目录联接）。
     """
 
     GRACEFUL_SHUTDOWN_DELAY = 0.3
@@ -109,17 +61,15 @@ class PopenCodexRunner:
     def __init__(
         self,
         is_terminal_line: Callable[[str], bool] | None = None,
-        *,
-        workdir: Path | str | None = None,
     ) -> None:
         self.is_terminal_line = is_terminal_line
-        self.workdir = workdir
 
     def run(
         self,
         cmd: list[str],
         *,
         prompt: str,
+        workdir: Path | str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
@@ -128,7 +78,7 @@ class PopenCodexRunner:
         process: subprocess.Popen[str] | None = None
         thread_box: list[threading.Thread | None] = [None]
         try:
-            process = self._spawn(popen_cmd, prompt=prompt)
+            process = self._spawn(popen_cmd, prompt=prompt, workdir=workdir)
             return self._drain(
                 process,
                 timeout=timeout,
@@ -158,10 +108,16 @@ class PopenCodexRunner:
         popen_cmd[0] = codex_path
         return popen_cmd
 
-    def _spawn(self, popen_cmd: list[str], *, prompt: str) -> subprocess.Popen[str]:
+    def _spawn(
+        self,
+        popen_cmd: list[str],
+        *,
+        prompt: str,
+        workdir: Path | str | None,
+    ) -> subprocess.Popen[str]:
         cwd: str | None = None
-        if self.workdir is not None:
-            cwd = format_cli_path(Path(self.workdir))
+        if workdir is not None:
+            cwd = format_cli_path(Path(workdir))
         process = subprocess.Popen(
             popen_cmd,
             shell=False,
@@ -265,29 +221,27 @@ class PopenCodexRunner:
                 if process.poll() is not None and not thread.is_alive():
                     break
 
-        if predicate_error is not None:
-            # 谓词抛 CommandTimeoutError → 收成单通道 ProcessOutcome
-            if isinstance(predicate_error, CommandTimeoutError):
-                term: Terminal = (
-                    "idle_timeout" if predicate_error.is_idle else "timeout"
-                )
-                return ProcessOutcome(
-                    lines=list(lines),
-                    exit_code=None,
-                    raw_output_lines=len(lines),
-                    terminal=term,
-                    error_message=str(predicate_error),
-                )
-            raise predicate_error
-
-        if timeout_terminal is not None:
+        def interrupted(term: Terminal, message: str) -> ProcessOutcome:
+            """中断类单通道结局：无退出码，行数以已收到的为准。"""
             return ProcessOutcome(
                 lines=list(lines),
                 exit_code=None,
                 raw_output_lines=len(lines),
-                terminal=timeout_terminal,
-                error_message=timeout_message,
+                terminal=term,
+                error_message=message,
             )
+
+        def from_predicate_timeout(err: CommandTimeoutError) -> ProcessOutcome:
+            """注入型谓词报告的超时 → 单通道结局。两处收敛点共用。"""
+            return interrupted("idle_timeout" if err.is_idle else "timeout", str(err))
+
+        if predicate_error is not None:
+            if isinstance(predicate_error, CommandTimeoutError):
+                return from_predicate_timeout(predicate_error)
+            raise predicate_error
+
+        if timeout_terminal is not None:
+            return interrupted(timeout_terminal, timeout_message)
 
         exit_code: Optional[int] = None
         wait_timeout = False
@@ -308,13 +262,7 @@ class PopenCodexRunner:
                 thread.join(timeout=5)
 
         if wait_timeout:
-            return ProcessOutcome(
-                lines=list(lines),
-                exit_code=None,
-                raw_output_lines=len(lines),
-                terminal="timeout",
-                error_message=wait_message,
-            )
+            return interrupted("timeout", wait_message)
 
         while not output_queue.empty():
             try:
@@ -323,14 +271,7 @@ class PopenCodexRunner:
                     continue
                 if isinstance(item, BaseException):
                     if isinstance(item, CommandTimeoutError):
-                        term = "idle_timeout" if item.is_idle else "timeout"
-                        return ProcessOutcome(
-                            lines=list(lines),
-                            exit_code=None,
-                            raw_output_lines=len(lines),
-                            terminal=term,
-                            error_message=str(item),
-                        )
+                        return from_predicate_timeout(item)
                     raise item
                 if item:
                     lines.append(item)

@@ -15,8 +15,31 @@ from codex_mcp_cyber.errors import (
     path_has_non_ascii,
     prefer_codex_workdir,
 )
-from codex_mcp_cyber.process import PopenCodexRunner, ProcessOutcome, ScriptedLinesRunner
+from codex_mcp_cyber.process import PopenCodexRunner, ProcessOutcome
 from codex_mcp_cyber.review import ReviewRequest, _build_cmd, run_review
+
+from runners import ScriptedLinesRunner
+
+
+def _ok_jsonl_lines(text: str = "OK", thread_id: str = "sess-1") -> list[str]:
+    """一条最小的成功行流：thread.started → agent_message → turn.completed。"""
+    import json
+
+    return [
+        json.dumps({"type": "thread.started", "thread_id": thread_id}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": text},
+            }
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+
+
+async def _no_sleep(_seconds: float) -> None:
+    """退避 seam 的测试 adapter：立即返回，不真的等。"""
+    return None
 
 
 @pytest.mark.parametrize(
@@ -251,15 +274,47 @@ def test_build_cmd_re_review_keeps_sandbox_and_cd(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_workdir_reaches_any_adapter_not_just_popen(tmp_path: Path) -> None:
+    """workdir 属于 seam，任何 adapter 都收得到。
+
+    此前它是 PopenCodexRunner 的字段，run_review 靠 isinstance 认出具体
+    adapter 才赋值 —— 非 Popen 的 adapter 会静默收不到 cwd。
+    """
+    runner = ScriptedLinesRunner(lines=_ok_jsonl_lines(), exit_code=0)
+    result = await run_review(
+        ReviewRequest(prompt="hi", cd=tmp_path, max_retries=0),
+        runner=runner,
+    )
+    assert result.success is True
+    assert len(runner.seen_workdirs) == 1
+    seen = runner.seen_workdirs[0]
+    assert seen is not None, "非 Popen adapter 未收到 workdir —— seam 又漏了"
+    assert Path(seen).name == tmp_path.name
+
+
+@pytest.mark.asyncio
+async def test_workdir_is_stable_across_retries(tmp_path: Path) -> None:
+    """重试不得改变交给 adapter 的 workdir。"""
+    runner = ScriptedLinesRunner(lines=["not-json"], exit_code=1)
+    await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=2),
+        runner=runner,
+        sleep=_no_sleep,
+    )
+    assert runner.calls == 3
+    assert len(set(str(w) for w in runner.seen_workdirs)) == 1
+
+
+@pytest.mark.asyncio
 async def test_run_review_sets_popen_workdir_on_real_runner(
     tmp_path: Path,
 ) -> None:
     captured: dict = {}
 
     class _CaptureRunner(PopenCodexRunner):
-        def run(self, cmd, *, prompt, timeout, max_duration):  # noqa: ANN001
+        def run(self, cmd, *, prompt, workdir=None, timeout, max_duration):  # noqa: ANN001
             captured["cmd"] = list(cmd)
-            captured["workdir"] = self.workdir
+            captured["workdir"] = workdir
             import json
 
             lines = [
@@ -410,7 +465,7 @@ def test_is_drive_relative() -> None:
 @pytest.mark.asyncio
 async def test_popen_oserror_267_is_invalid_path(tmp_path: Path) -> None:
     class _Boom(PopenCodexRunner):
-        def run(self, cmd, *, prompt, timeout, max_duration):  # noqa: ANN001
+        def run(self, cmd, *, prompt, workdir=None, timeout, max_duration):  # noqa: ANN001
             err = OSError(267, "The directory name is invalid")
             err.winerror = 267  # type: ignore[attr-defined]
             raise err
@@ -661,7 +716,7 @@ def test_looks_like_unc_mixed_separators() -> None:
 @pytest.mark.asyncio
 async def test_popen_oserror_becomes_structured_failure(tmp_path: Path) -> None:
     class _Boom(PopenCodexRunner):
-        def run(self, cmd, *, prompt, timeout, max_duration):  # noqa: ANN001
+        def run(self, cmd, *, prompt, workdir=None, timeout, max_duration):  # noqa: ANN001
             raise OSError(123, "模拟 WinError 123")
 
     result = await run_review(

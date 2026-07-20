@@ -16,21 +16,16 @@ class CommandNotFoundError(Exception):
 
 
 class CommandTimeoutError(Exception):
-    """命令执行超时错误"""
+    """命令执行超时错误。
 
-    def __init__(
-        self,
-        message: str,
-        is_idle: bool = False,
-        *,
-        partial_lines: list[str] | None = None,
-        raw_output_lines: int = 0,
-    ):
+    生产端不抛此异常（超时走 ProcessOutcome.terminal）；它是注入型
+    ``is_terminal_line`` 谓词向 runner 报告超时的唯一信道。
+    行的收集由 runner 自己负责，异常只带 is_idle。
+    """
+
+    def __init__(self, message: str, is_idle: bool = False):
         super().__init__(message)
         self.is_idle = is_idle
-        # 超时前已产出的行（用于 last_lines / 诊断，与旧实现一致）
-        self.partial_lines: list[str] = list(partial_lines or [])
-        self.raw_output_lines = raw_output_lines
 
 
 class ErrorKind:

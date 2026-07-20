@@ -272,6 +272,7 @@ def _run_attempt(
     cmd: list[str],
     *,
     prompt: str,
+    workdir: Path | str | None,
     timeout: int,
     max_duration: int,
     collect_messages: bool,
@@ -280,6 +281,7 @@ def _run_attempt(
     outcome = runner.run(
         cmd,
         prompt=prompt,
+        workdir=workdir,
         timeout=timeout,
         max_duration=max_duration,
     )
@@ -385,9 +387,9 @@ async def run_review(
 
     codex_cd = prefer_codex_workdir(cd_path)
     cmd = _build_cmd(req, codex_cd)
-    # Popen 也设 cwd，让 Codex 子工具的相对路径解析落在同一目录（ASCII 联接时尤其重要）
-    if isinstance(active_runner, PopenCodexRunner):
-        active_runner.workdir = codex_cd
+    # 子进程 cwd 也设为审核目录，让 Codex 子工具的相对路径解析落在同一处
+    #（ASCII 联接时尤其重要）。经 run(...) 传入 —— 它是 seam 的一部分，
+    # 不是某个具体 adapter 的字段。
     max_retries = max(0, req.max_retries)
     retries = 0
     last: _AttemptOutcome | None = None
@@ -398,6 +400,7 @@ async def run_review(
                 active_runner,
                 cmd,
                 prompt=req.prompt,
+                workdir=codex_cd,
                 timeout=req.timeout,
                 max_duration=req.max_duration,
                 collect_messages=req.return_all_messages,

@@ -12,7 +12,9 @@ from codex_mcp_cyber.errors import (
     ErrorKind,
     normalize_workdir,
 )
-from codex_mcp_cyber.process import ProcessOutcome, ScriptedLinesRunner, SequenceRunner
+from codex_mcp_cyber.process import ProcessOutcome
+
+from runners import ScriptedLinesRunner, SequenceRunner
 from codex_mcp_cyber.review import ReviewRequest, run_review, to_wire
 from codex_mcp_cyber.tools.codex import codex_tool
 
@@ -25,10 +27,11 @@ class _RaiseNotFoundRunner:
         cmd: list[str],
         *,
         prompt: str,
+        workdir: Path | str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
-        del cmd, prompt, timeout, max_duration
+        del cmd, prompt, workdir, timeout, max_duration
         raise CommandNotFoundError("未找到 codex CLI（测试）")
 
 def _ok_lines(text: str = "PONG", thread_id: str = "sess-1") -> list[str]:
@@ -63,10 +66,11 @@ class _CountingNotFoundRunner:
         cmd: list[str],
         *,
         prompt: str,
+        workdir: Path | str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
-        del cmd, prompt, timeout, max_duration
+        del cmd, prompt, workdir, timeout, max_duration
         self.calls += 1
         raise CommandNotFoundError("未找到 codex CLI（测试）")
 
