@@ -243,6 +243,31 @@ def test_active_docs_do_not_reference_removed_junction_layer() -> None:
             assert tok not in text, f"{p.name} 仍引用已移除的联接层：{tok!r}"
 
 
+def test_three_round_gate_mentions_include_user_override() -> None:
+    """凡写「最多 3 轮」上限的活跃文档行，同行必须写明用户授权例外。
+
+    0.5.1 复审两轮撞上同一漂移：SKILL.md 加了「用户明确授权可超闸续审」，
+    README 多处仍是无条件上限——两条相反的规则并存，执行者按先读到的哪份走。
+    逐行钉（而非逐文件）：单独一句无条件上限本身就是误导。枚举下限防空过。
+    """
+    cap = re.compile(r"最多\s*\**3\s*轮|max\s+\**3\**\s+rounds", re.I)
+    override = re.compile(r"授权|approval", re.I)
+    doc_paths = sorted((_REPO / "skills" / "cc-review").glob("*.md"))
+    doc_paths += [_REPO / "README.md", _REPO / "README_EN.md"]
+    hits = 0
+    for p in doc_paths:
+        for i, line in enumerate(
+            p.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if cap.search(line):
+                hits += 1
+                assert override.search(line), (
+                    f"{p.name}:{i} 写了 3 轮上限但同行缺用户授权例外："
+                    f"{line.strip()!r}"
+                )
+    assert hits >= 5, f"3 轮上限表述枚举异常（仅 {hits} 处，不得空过）"
+
+
 def test_readme_remote_install_matches_setup_scripts() -> None:
     """README 远程安装命令必须存在，且与 setup.sh 的 uvx 命令逐词一致。
 

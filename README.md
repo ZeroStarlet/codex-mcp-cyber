@@ -47,7 +47,7 @@ flowchart LR
   C -->|✅ / ⚠️| F
 ```
 
-> 复审必须复用同一 `SESSION_ID`；同一改动最多 **3 轮**，否则抛人工裁决。
+> 复审必须复用同一 `SESSION_ID`；同一改动最多 **3 轮**，否则抛人工裁决（用户明确授权可续审）。
 
 ### 两件套
 
@@ -130,7 +130,7 @@ chmod +x setup.sh && ./setup.sh
 | **2** | `git diff --no-color`，按 [审查清单](skills/cc-review/review-checklist.md) 组 PROMPT |
 | **3** | 调用 `codex` · `sandbox=read-only` · 初审 `SESSION_ID=""` |
 | **4** | Codex → ✅ 通过 · ⚠️ 可合入建议 · ❌ 必须改 |
-| **5** | ❌ → 逐条修 → **复审复用 `SESSION_ID`** → 最多 3 轮 |
+| **5** | ❌ → 逐条修 → **复审复用 `SESSION_ID`** → 最多 3 轮（用户明确授权可续审） |
 | **6** | ✅ → 合入 / 提交 |
 
 完整规则（含强制送审）：[`skills/cc-review/SKILL.md`](skills/cc-review/SKILL.md)

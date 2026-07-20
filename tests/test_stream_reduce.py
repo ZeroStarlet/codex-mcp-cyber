@@ -64,6 +64,77 @@ def test_reduce_prioritizes_invalid_path_over_protocol() -> None:
     assert stream.error_kind == ErrorKind.INVALID_PATH
     assert stream.had_error is True
 
+def test_reduce_subtool_123_noise_with_session_stays_success() -> None:
+    """生产事故回归（2026-07-20）：子工具 rg 吐的 os error 123 纯文本行，
+    不得盖掉已取得会话标识的成功审查。
+
+    123 文本特征只允许对「最终无会话标识」的行流定罪；已建会话的运行里
+    它只是诊断噪音（json_decode_errors 照计，error_message 照记）。
+    """
+    lines = _ok_lines("✅ PASS", thread_id="sess-noise")
+    lines.insert(1, "rg: setup*: 文件名、目录名或卷标语法不正确。 (os error 123)")
+    stream = reduce_codex_stream(_po(lines, exit_code=0))
+    assert stream.had_error is False
+    assert stream.error_kind is None
+    assert stream.session_id == "sess-noise"
+    assert stream.text == "✅ PASS"
+    assert stream.json_decode_errors == 1
+
+def test_reduce_blank_thread_id_is_not_a_session() -> None:
+    """空串 / 纯空白 thread_id 不算已建会话：123 噪音下不得静默成功。
+
+    复审要拿它 resume——空白串对复审毫无用处，视同未取得会话标识，
+    finalize 照常定罪 invalid_path。
+    """
+    for blank in ("", "   ", "\t"):
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": blank}),
+            "rg: setup*: 文件名、目录名或卷标语法不正确。 (os error 123)",
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "✅ PASS"},
+                }
+            ),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ]
+        stream = reduce_codex_stream(_po(lines, exit_code=0))
+        assert stream.session_id is None, repr(blank)
+        assert stream.had_error is True, repr(blank)
+        assert stream.error_kind == ErrorKind.INVALID_PATH, repr(blank)
+
+def test_reduce_non_string_thread_id_is_unexpected() -> None:
+    """非字符串 thread_id 是畸形事件：不得容错成 success（与 agent_message.text 同策）。"""
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": 123}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    stream = reduce_codex_stream(_po(lines, exit_code=0))
+    assert stream.had_error is True
+    assert stream.error_kind == ErrorKind.UNEXPECTED_EXCEPTION
+    assert stream.session_id is None
+
+def test_reduce_session_plus_failed_123_is_retryable_upstream() -> None:
+    """已建会话 + turn.failed 携 123 文本 → upstream_error（可重试），非 invalid_path。
+
+    0.5.1 声明的取舍：会话已建立说明工作目录没问题，turn 层失败按上游错误处理。
+    """
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "sess-f"}),
+        json.dumps(
+            {
+                "type": "turn.failed",
+                "error": {
+                    "message": "rg: 文件名、目录名或卷标语法不正确。 (os error 123)"
+                },
+            }
+        ),
+    ]
+    stream = reduce_codex_stream(_po(lines, exit_code=1))
+    assert stream.had_error is True
+    assert stream.error_kind == ErrorKind.UPSTREAM_ERROR
+    assert stream.session_id == "sess-f"
+
 def test_reduce_completed_success_carries_exit_and_raw() -> None:
     stream = reduce_codex_stream(_po(_ok_lines("OK")))
     assert stream.had_error is False

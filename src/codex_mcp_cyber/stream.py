@@ -145,8 +145,16 @@ def _fold_ok_event(
             )
         out.text += text
 
-    if line_dict.get("thread_id") is not None:
-        out.session_id = line_dict.get("thread_id")
+    # 会话证据仅认非空白字符串：空串 / 纯空白没法用于复审 resume，视同
+    # 未建会话；非字符串按畸形事件处理（与 agent_message.text 同策）。
+    thread_id = line_dict.get("thread_id")
+    if thread_id is not None:
+        if not isinstance(thread_id, str):
+            raise TypeError(
+                f"expected thread_id str, got {type(thread_id).__name__}"
+            )
+        if thread_id.strip():
+            out.session_id = thread_id
 
     event_type = line_dict.get("type", "")
     if event_type is None:
@@ -195,9 +203,6 @@ def _fold_lines(
         if isinstance(decoded, _JsonDecode):
             out.json_decode_errors += 1
             out.error_message += "\n\n[json decode error] " + decoded.line
-            if looks_like_invalid_path_error(decoded.line):
-                out.had_error = True
-                out.error_kind = ErrorKind.INVALID_PATH
             continue
         if isinstance(decoded, _Malformed):
             out.error_message += (
@@ -224,7 +229,11 @@ def _finalize_stream_outcome(
     exit_code: Optional[int],
 ) -> StreamOutcome:
     """在归约结果上叠加 success 判定用的错误优先级（仅 completed 终态）。"""
-    if stream.error_kind != ErrorKind.INVALID_PATH and looks_like_invalid_path_error(
+    # 123 文本特征只对「最终未取得会话标识」的行流定罪：子工具（如 rg）向
+    # 合流 stdout 吐的 os error 123 纯文本命中同一特征，而已建会话的运行
+    # 显然不是工作目录非法（生产事故：成功审查被盖成 invalid_path 失败，
+    # wire 丢会话标识与结论）。
+    if stream.session_id is None and looks_like_invalid_path_error(
         stream.error_message
     ):
         stream.error_kind = ErrorKind.INVALID_PATH

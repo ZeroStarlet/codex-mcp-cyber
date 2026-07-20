@@ -47,7 +47,7 @@ flowchart LR
   C -->|✅ / ⚠️| F
 ```
 
-> Re-review **must** reuse the same `SESSION_ID`. Max **3** rounds per change, then human.
+> Re-review **must** reuse the same `SESSION_ID`. Max **3** rounds per change, then human (beyond only with explicit user approval).
 
 ### Two pieces
 
@@ -130,7 +130,7 @@ Prefer the plugin skill **`cc-review`**:
 | **2** | `git diff --no-color`; build PROMPT from the [checklist](skills/cc-review/review-checklist.md) |
 | **3** | Call `codex` · `sandbox=read-only` · first review `SESSION_ID=""` |
 | **4** | Codex → ✅ pass · ⚠️ non-blocking · ❌ must-fix |
-| **5** | ❌ → fix item by item → **re-review reuses `SESSION_ID`** → max 3 rounds |
+| **5** | ❌ → fix item by item → **re-review reuses `SESSION_ID`** → max 3 rounds (beyond only with explicit user approval) |
 | **6** | ✅ → merge / commit |
 
 Full rules (including forced review): [`skills/cc-review/SKILL.md`](skills/cc-review/SKILL.md)

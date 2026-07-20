@@ -3,6 +3,7 @@ name: cc-review
 description: >
   Claude 写码自测、Codex 只审不改的终审闭环。
   Use when: 功能/bug/重构完成后要独立 code review；
+  合入/提交前把关，或用户说「送审 / 审一下 / 让 Codex 看看」；
   强制送审（不可逆/信任边界/静默失效/级联/密钥）；
   修复后复审需复用 SESSION_ID；或用户提到 Codex 终审 / cc-review。
 ---
@@ -29,9 +30,9 @@ description: >
 
 1. **拆需求** → 影响文件与可验证验收标准已写出。
 2. **写码并自测** → 相关测试 / 冒烟已绿；无命令则写明为何跳过。
-3. **取 diff、组 PROMPT** → `git diff --no-color` 已嵌入；无未替换的 `[方括号占位符]`；完整清单见 [review-checklist.md](review-checklist.md)。
+3. **取 diff、组 PROMPT** → `git diff --no-color` 已嵌入（大 diff 改走文件引用，见清单）；无未替换的 `[方括号占位符]`；完整清单见 [review-checklist.md](review-checklist.md)。
 4. **初审** → `SESSION_ID=""`，`sandbox="read-only"`。完成：结论含 ✅ / ⚠️ / ❌，并记下 `SESSION_ID`。
-5. **修复** → 清单每条标注：已修 / 有证据反驳 / 本轮推迟（附因）；只改问题相关代码（**外科手术式**）。
+5. **修复** → 清单每条标注：已修 / 有证据反驳 / 本轮推迟（附因），处置表随修复 diff 进复审 PROMPT；只改问题相关代码（**外科手术式**）。
 6. **复审** → 复用上一轮 `SESSION_ID`；丢失则 `""` + 初审摘要进 PROMPT。回到 5，直至 ✅ PASS 或触发 **3 轮闸**。
 
 ```text
@@ -63,7 +64,7 @@ description: >
 | ❌ CHANGE | 必须修复 → 复审；触发 **3 轮闸** 则抛人工 |
 | 无 ✅/⚠️/❌ 标记 | 按 ⚠️；乱码 / 截断按工具失败（[scenarios.md](scenarios.md) F） |
 
-**3 轮闸**：同一改动最多 3 轮审查（初审 → 修 → 复审 → …）。第 3 次复审仍 ❌ → 停下，附原始意见、反驳依据、分歧摘要，抛人工。不得无限循环。Claude **不得自批 PASS**。
+**3 轮闸**：同一改动最多 3 轮审查（初审 → 修 → 复审 → …）。第 3 次复审仍 ❌ → 停下，附原始意见、反驳依据、分歧摘要，抛人工；用户明确授权「继续审到 PASS」时可超闸续审。不得无限循环。Claude **不得自批 PASS**。
 
 ## 参考
 

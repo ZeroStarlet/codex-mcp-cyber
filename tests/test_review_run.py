@@ -99,6 +99,54 @@ async def test_os_error_123_classifies_as_invalid_path(tmp_path: Path) -> None:
     assert any("os error 123" in str(x) for x in detail.get("last_lines", []))
 
 @pytest.mark.asyncio
+async def test_subtool_123_noise_does_not_mask_successful_review(
+    tmp_path: Path,
+) -> None:
+    """生产事故回归（2026-07-20）：审查实际完成（thread_id + agent_message +
+    turn.completed），但子工具向合流 stdout 吐了含 os error 123 的纯文本行，
+    曾被盖成 invalid_path 失败终局 —— wire 丢 SESSION_ID 与整份结论。"""
+    lines = _ok_lines("✅ PASS")
+    lines.insert(1, "rg: setup*: 文件名、目录名或卷标语法不正确。 (os error 123)")
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=0),
+        runner=ScriptedLinesRunner(lines=lines, exit_code=0),
+    )
+    assert result.success is True
+    assert result.session_id == "sess-1"
+    assert result.text == "✅ PASS"
+    wire = to_wire(result)
+    assert wire["success"] is True
+    assert wire["SESSION_ID"] == "sess-1"
+
+@pytest.mark.asyncio
+async def test_session_failed_123_retries_then_recovers(tmp_path: Path) -> None:
+    """已建会话 + turn.failed 携 123 → upstream_error 确实进入重试并可恢复。"""
+    failed_lines = [
+        json.dumps({"type": "thread.started", "thread_id": "sess-f"}),
+        json.dumps(
+            {
+                "type": "turn.failed",
+                "error": {
+                    "message": "rg: 文件名、目录名或卷标语法不正确。 (os error 123)"
+                },
+            }
+        ),
+    ]
+    runner = SequenceRunner(
+        steps=[
+            ProcessOutcome(lines=failed_lines, exit_code=1, raw_output_lines=2),
+            ProcessOutcome(lines=_ok_lines("RECOVERED"), exit_code=0, raw_output_lines=4),
+        ]
+    )
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=1),
+        runner=runner,
+    )
+    assert result.success is True
+    assert result.text == "RECOVERED"
+    assert runner.calls == 2
+
+@pytest.mark.asyncio
 async def test_happy_jsonl_returns_session_and_text(tmp_path: Path) -> None:
     runner = ScriptedLinesRunner(lines=_ok_lines("OK"), exit_code=0)
     result = await run_review(

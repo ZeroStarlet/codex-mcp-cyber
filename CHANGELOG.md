@@ -1,5 +1,48 @@
 # 变更记录
 
+## 0.5.1
+
+### 修复：子工具 123 噪音不再盖掉成功审查
+
+**结论先行**：`invalid_path` 现在只可能出现在**未取得会话标识**的运行上。
+生产事故（2026-07-20）：审查实际完成（thread_id + agent_message +
+turn.completed），但 Codex 子工具（rg 通配）向合流 stdout 吐了含
+「os error 123」的纯文本行——行流折叠期按文本特征立即定罪 invalid_path，
+失败终局不可重试，wire 丢 SESSION_ID 与整份结论。
+
+- `stream.py`：JSON 解码失败行不再在折叠期定罪；123 文本特征的
+  invalid_path 判定收敛到 finalize，且仅当行流**最终无会话标识**时成立。
+  已建会话的运行里，123 文本只计入诊断（json_decode_errors / last_lines）。
+- 回归钉子：stream 层
+  （`test_reduce_subtool_123_noise_with_session_stays_success`）与
+  review→wire 层（`test_subtool_123_noise_does_not_mask_successful_review`）。
+- 会话证据强化（Codex 初审意见）：`thread_id` 仅认**非空白字符串**——空串 /
+  纯空白视同未建会话（复审无法 resume），非字符串按畸形事件归
+  unexpected_exception；
+  另钉住「已建会话 + turn.failed 携 123 → upstream_error 可重试」契约
+  （stream 层 + review 层重试用例）。
+- 真实 workdir 非法（无会话）的判定与不可重试语义不变。
+
+### 技能：cc-review 实战摩擦点制度化
+
+六轮实战沉淀进文档（均为增量，六步闭环结构不变）：
+
+- **大 diff 走文件**：超约 2 万 token 的 diff 写入 `.scratch/review-<日期>.diff`，
+  PROMPT 给路径并要求 Codex 与实时 diff 交叉核对（checklist + examples 场景 6）。
+- **自测证据**成为标准 PROMPT 字段：Codex 只读沙箱通常起不了全量测试，
+  测试证据由 Claude 提供；需其亲验时给定向单测命令（guide 使用规范 5）。
+- **复审收敛**：逐条处置表（已修 / 反驳 / 推迟）随修复 diff 进复审 PROMPT；
+  可引用 Codex 上轮自设标准。
+- **3 轮闸**：明确用户授权「继续审到 PASS」可超闸续审（SKILL / scenarios /
+  examples / 双份 README 全同步，并新增契约钉：凡写 3 轮上限须同行带授权例外）。
+- description 触发面加宽（送审 / 审一下 / 合入前把关）；SESSION_ID 场景表
+  收敛为 SKILL.md 单一来源；guide 补充「invalid_path 仅见于未建会话运行」。
+
+### 版本口径
+
+Python 包 0.5.0 → 0.5.1（行为修复，wire 契约不变）；`plugin.json`
+0.2.2 → 0.2.3（技能文档增强）。
+
 ## 0.5.0
 
 ### 移除：ASCII 目录联接层（winlink / winsec）

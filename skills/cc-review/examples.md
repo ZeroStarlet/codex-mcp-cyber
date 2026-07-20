@@ -93,11 +93,33 @@ LineItems 由 NewOrder() 初始化为 make([]LineItem, 0)（order.go:42），永
 | 字段 | 值 |
 |------|-----|
 | SESSION_ID | 复用初审 |
-| 处理 | 最多 3 轮；仍僵持 → 人工裁决（见 [scenarios.md](scenarios.md) E） |
+| 处理 | 最多 3 轮；仍僵持 → 人工裁决，或经用户明确授权续审（见 [scenarios.md](scenarios.md) E） |
 
 ---
 
-## 6. 工具不可用
+## 6. 大 diff（走文件引用）
+
+**场景**：千行级重构，diff 内嵌会撑爆 PROMPT。
+**要点**：diff 落仓库内文件；PROMPT 给路径并要求 Codex 交叉核对实时 diff。
+
+| 字段 | 值 |
+|------|-----|
+| 改动文件 | `src/users/…` 等 20 个文件 |
+| 改动目的 | 单体 service 拆分 + 全仓 import 归一（纯重构，行为不变） |
+| 自测证据 | `pytest -q` 212 passed |
+| 本次重点 | 语义漂移、循环依赖、导入路径 |
+| SESSION_ID | `""` |
+
+PROMPT 中用以下段**替换**内嵌 diff：
+
+```text
+**Git Diff**：完整 diff 已写入 `.scratch/review-2026-07-20.diff`（约 3 千行）。
+请读取该文件，并与 `git diff --no-color` 实时输出交叉核对一致后再审。
+```
+
+---
+
+## 7. 工具不可用
 
 **`command_not_found` / `auth_required`**：不重试；提示安装或 `codex login`。
 **其他错误**：工具重试 1 次；仍失败则写 `docs/pending-review-<date>.md`（diff + 意图），恢复后补审。
