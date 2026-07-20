@@ -1,12 +1,14 @@
-"""审核错误的分类法与详情装配。
+"""审核错误的分类法、详情装配与人话展示。
 
-只放「错误是什么」——异常类型、ErrorKind 取值、以及给 wire 用的 error_detail。
-「什么算哪种错」在 classify；路径归一在 paths；Windows 安全原语在 winsec /
-winlink；脱敏在 redact。
+只放「错误是什么 + 给人看什么话」——异常类型、ErrorKind 取值、给 wire 用的
+error_detail，以及按种类生成的修复指引（display_error / build_error_detail 的
+suggestion）。「什么算哪种错」在 classify；路径归一在 paths；Windows 安全
+原语在 winsec / winlink；脱敏在 redact。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from codex_mcp_cyber.redact import LAST_LINES_LIMIT, filter_last_lines
@@ -75,3 +77,41 @@ def build_error_detail(
     if retries > 0:
         detail["retries"] = retries
     return detail
+
+
+def display_error(
+    *,
+    error_kind: Optional[str],
+    error_message: str,
+    real_workdir: Optional[Path] = None,
+) -> str:
+    """wire 用人类可读错误文案（种类 → 人话的单一归属）。
+
+    领域结局只保留 error_message；修复指引在映射为 wire 时才叠加。
+    ``real_workdir``：归一后的真实仓库路径，仅 invalid_path 文案展示用。
+    """
+    raw = error_message or ""
+    if error_kind == ErrorKind.AUTH_REQUIRED:
+        return (
+            "请先登录 Codex CLI。运行以下命令完成认证：\n"
+            "  codex login\n"
+            "\n"
+            "或使用 API Key 认证：\n"
+            "  printenv OPENAI_API_KEY | codex login --with-api-key\n"
+            "\n" + raw
+        )
+    if error_kind == ErrorKind.INVALID_PATH:
+        path_line = (
+            f"已归一化路径：{real_workdir}\n" if real_workdir is not None else ""
+        )
+        return (
+            "工作目录路径非法或 Codex 在访问路径时触发 Windows os error 123。\n"
+            f"{path_line}"
+            "常见原因：\n"
+            "1) cd 被包了字面引号（应传裸路径：C:/Users/you/project）\n"
+            "2) 中文/非 ASCII 路径下 Codex 内部工具解析失败"
+            "（本工具会尝试建 ASCII 目录联接；若仍失败，请把仓库放到纯英文路径）\n"
+            "3) 路径不存在或含非法尾部空格/点\n"
+            "\n" + raw
+        )
+    return raw

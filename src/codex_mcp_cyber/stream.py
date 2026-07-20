@@ -1,26 +1,60 @@
-"""行流归约：JSONL / 纯文本 → StreamOutcome（领域词）。"""
+"""行流：行流结果（ProcessOutcome）与归约 —— JSONL / 纯文本 → StreamOutcome。
+
+单入口 ``reduce_codex_stream(ProcessOutcome)``，终态在实现内折叠：
+
+- completed：折叠事件后叠加 finalize 优先级（invalid_path / 缺会话标识 /
+  空正文 / 退出码非零）。
+- timeout / idle_timeout：只折叠诊断信息（last_lines / json_decode_errors /
+  all_messages），正文与会话标识不外流，错误种类由终态决定，**不做**
+  finalize 补判 —— 超时终局本就没有会话标识与正文，补判会把 timeout
+  盖成 protocol_missing_session / empty_result，丢掉真正的失败原因。
+
+调用方因此无需知道「何时 finalize」；该顺序不变量属于本模块实现。
+"""
 
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from codex_mcp_cyber.classify import is_auth_error, looks_like_invalid_path_error
 from codex_mcp_cyber.errors import ErrorKind
 from codex_mcp_cyber.redact import LAST_LINES_LIMIT, redact_tool_result_event
 
+Terminal = Literal["completed", "timeout", "idle_timeout"]
+
+
+@dataclass(frozen=True)
+class ProcessOutcome:
+    """一次进程执行的行流结果（含超时终态；单通道）。
+
+    行流词汇的一部分，定义在本模块；runner seam（process）导入使用。
+    """
+
+    lines: list[str]
+    exit_code: Optional[int]
+    raw_output_lines: int
+    terminal: Terminal = "completed"
+    error_message: str = ""
+
 
 @dataclass
 class StreamOutcome:
-    """归约结局：字段用领域词（与 ReviewResult / Attempt 对齐）。"""
+    """归约结局：字段用领域词（与 ReviewResult 对齐）。
+
+    exit_code / raw_output_lines 来自行流结果，随归约一起交付，
+    编排层无需再拼第二个同构结构。
+    """
 
     text: str = ""
     session_id: Optional[str] = None
     had_error: bool = False
     error_message: str = ""
     error_kind: Optional[str] = None
+    exit_code: Optional[int] = None
+    raw_output_lines: int = 0
     json_decode_errors: int = 0
     last_lines: list[str] = field(default_factory=list)
     all_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -145,12 +179,12 @@ def _fold_ok_event(
                 out.error_kind = ErrorKind.UPSTREAM_ERROR
 
 
-def reduce_codex_stream(
+def _fold_lines(
     lines: list[str],
     *,
     collect_messages: bool = False,
 ) -> StreamOutcome:
-    """把一行流行列折叠成结构化结局。"""
+    """把一行流行列折叠成结构化结局（不含终态与 finalize 判定）。"""
     out = StreamOutcome()
     for line in lines:
         out.last_lines.append(line)
@@ -184,12 +218,12 @@ def reduce_codex_stream(
     return out
 
 
-def finalize_stream_outcome(
+def _finalize_stream_outcome(
     stream: StreamOutcome,
     *,
     exit_code: Optional[int],
 ) -> StreamOutcome:
-    """在归约结果上叠加 success 判定用的错误优先级。"""
+    """在归约结果上叠加 success 判定用的错误优先级（仅 completed 终态）。"""
     if stream.error_kind != ErrorKind.INVALID_PATH and looks_like_invalid_path_error(
         stream.error_message
     ):
@@ -220,3 +254,40 @@ def finalize_stream_outcome(
         )
 
     return stream
+
+
+def reduce_codex_stream(
+    outcome: ProcessOutcome,
+    *,
+    collect_messages: bool = False,
+) -> StreamOutcome:
+    """把一次行流结果折叠成结构化结局（终态感知单入口）。
+
+    超时终局：正文与会话标识保持空（行为冻结），种类由终态决定
+    （idle_timeout / timeout），仅诊断信息取自折叠。
+    完成终局：折叠后叠加 finalize 优先级，并携带 exit_code /
+    raw_output_lines。
+    """
+    folded = _fold_lines(outcome.lines, collect_messages=collect_messages)
+
+    if outcome.terminal in ("timeout", "idle_timeout"):
+        kind = (
+            ErrorKind.IDLE_TIMEOUT
+            if outcome.terminal == "idle_timeout"
+            else ErrorKind.TIMEOUT
+        )
+        return StreamOutcome(
+            had_error=True,
+            error_kind=kind,
+            error_message=outcome.error_message or "timeout",
+            exit_code=None,
+            raw_output_lines=outcome.raw_output_lines or len(outcome.lines),
+            json_decode_errors=folded.json_decode_errors,
+            last_lines=folded.last_lines,
+            all_messages=folded.all_messages,
+        )
+
+    folded = _finalize_stream_outcome(folded, exit_code=outcome.exit_code)
+    folded.exit_code = outcome.exit_code
+    folded.raw_output_lines = outcome.raw_output_lines
+    return folded

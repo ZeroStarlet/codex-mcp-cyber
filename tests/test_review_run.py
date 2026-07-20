@@ -9,7 +9,7 @@ import pytest
 
 from codex_mcp_cyber.errors import CommandNotFoundError, ErrorKind
 from codex_mcp_cyber.paths import normalize_workdir
-from codex_mcp_cyber.process import ProcessOutcome
+from codex_mcp_cyber.stream import ProcessOutcome
 
 from runners import ScriptedLinesRunner, SequenceRunner
 from codex_mcp_cyber.review import ReviewRequest, run_review, to_wire

@@ -35,8 +35,8 @@
 
 | 错误类型 | 处理 |
 |---------|------|
-| `command_not_found` / `auth_required` | 提示用户安装 / `codex login`，**不重试** |
-| 其他（`timeout` / `upstream_error` / `json_decode` 等） | 工具默认重试 1 次 |
+| `command_not_found` / `auth_required` / `invalid_path` | 提示用户安装 / `codex login` / 检查 `cd` 路径，**不重试** |
+| 其他（`timeout` / `upstream_error` 等） | 工具默认重试 1 次 |
 | 仍然失败 | 将 diff 与审查意图写入 `docs/pending-review-<date>.md`，待恢复后补审 |
 
 工具层重试（单次调用）与流程层 3 轮闸互不冲突。

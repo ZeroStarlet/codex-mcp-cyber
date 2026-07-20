@@ -1,5 +1,71 @@
 # 变更记录
 
+## 0.4.0
+
+### 破坏性变更（仓库内 API；wire 契约不变）
+
+`codex` 工具的 15 个参数与返回字典（wire）**完全不变**；以下仅影响从包内模块导入的代码。
+
+**行流归约收拢为终态感知单入口。**
+
+```python
+# 0.3.0：两段式 + 顺序约束（超时终局不得 finalize，靠调用方注释维持）
+stream = reduce_codex_stream(lines, collect_messages=...)
+stream = finalize_stream_outcome(stream, exit_code=...)
+
+# 0.4.0：单入口，终态在实现内折叠
+stream = reduce_codex_stream(process_outcome, collect_messages=...)
+```
+
+- `reduce_codex_stream` 改收 `ProcessOutcome`；`finalize_stream_outcome` 转为私有。
+- 超时 → `ErrorKind` 的映射随之从 review 移入 stream；`review._AttemptOutcome`
+  删除，`StreamOutcome` 增加 `exit_code` / `raw_output_lines`。
+- `ProcessOutcome` / `Terminal` 定义移至 `stream`（行流词汇归行流模块）；
+  `codex_mcp_cyber.process` 仍可导入同名对象（同一类型）。
+
+**`cli.py` 删除。** `[project.scripts]` 直指 `codex_mcp_cyber.server:run`
+（控制台命令名不变，重装后生效）。
+**`tools/__init__.py` 不再再导出 `codex_tool`**（该导入路径全仓零消费者）；
+请从 `codex_mcp_cyber.tools.codex` 导入。
+
+**`review._build_cmd` → 公开接口 `review.build_codex_argv`。** 初审 / 复审的
+argv 规则（复审 `resume <会话标识>` 缀于所有 flag 之后、`--image` 相对审核
+别名等）是编码侧协议的单一来源，不再是私有函数。
+
+### 命名（领域词对齐）
+
+「工作目录」的两个所指分名：`ReviewResult.workdir` → `ReviewResult.real_workdir`
+（真实仓库路径）；review 内部 `cd_path` / `codex_cd` → `real_workdir` /
+`codex_workdir`（审核别名）。行流 seam 的 `workdir=` 参数名保持 0.3.0 契约不变。
+CONTEXT.md 增补「真实仓库路径 / 审核别名」词条。
+
+### 内部重构
+
+- `errors.display_error`：错误人话文案（auth / invalid_path 修复指引）从 review
+  移入 errors，与 `build_error_detail` 的 suggestion 同址 —— 「种类 → 人话」
+  单一归属。
+- `winsec.WinApiSecurity`：实现体并入方法、组合经 `self`（此前为模块函数 +
+  纯转发方法对）。子类可按方法粒度替换叶子原语，测试不再 monkeypatch
+  模块私有符号。
+- `winlink.CACHE_ROOT_PREFIX`：ASCII 缓存根前缀提为具名常量，与文档互钉。
+- `scripts/repro_os_error_123.py` 改用 `classify.looks_like_invalid_path_error`，
+  不再自实现 123 特征判定。
+
+### 文档与契约测试
+
+- 修正 codex-guide.md / scenarios.md 的幽灵错误种类 `json_decode`（0.3.0 已删，
+  文档未跟）；`last_lines` 行数说明 20 → 50；返回值示例补恒在的 `duration` 键；
+  重试说明补 `invalid_path` 不重试。
+- README / README_EN 手动安装命令补 `--refresh`，与 setup 脚本一致。
+- 新增 `tests/test_contract_docs.py`：文档表述（参数表 / error_kind 表 /
+  返回键 / 行数 / 缓存前缀 / `--refresh`）与代码单一来源互钉；版本号
+  `pyproject` ↔ `__init__` 互钉 —— 漂移在 CI 变红，不在终审现场暴露。
+
+### 版本口径
+
+Python 包 0.3.0 → 0.4.0（包内 API 破坏性变更）；`plugin.json` 0.2.0 → 0.2.1
+（本次触及 cc-review 技能文档）。
+
 ## 0.3.0
 
 ### 破坏性变更

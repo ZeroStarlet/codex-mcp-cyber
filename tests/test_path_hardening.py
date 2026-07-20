@@ -15,8 +15,9 @@ from codex_mcp_cyber.paths import (
     path_has_non_ascii,
 )
 from codex_mcp_cyber.winlink import prefer_codex_workdir
-from codex_mcp_cyber.process import PopenCodexRunner, ProcessOutcome
-from codex_mcp_cyber.review import ReviewRequest, _build_cmd, run_review
+from codex_mcp_cyber.process import PopenCodexRunner
+from codex_mcp_cyber.review import ReviewRequest, build_codex_argv, run_review
+from codex_mcp_cyber.stream import ProcessOutcome
 
 from runners import ScriptedLinesRunner
 from winsec_fake import FakeWinSecurity
@@ -246,18 +247,18 @@ def test_junction_link_dir_goes_through_private_dir_policy(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows path formatting")
-def test_build_cmd_uses_formatted_path_without_quotes(tmp_path: Path) -> None:
+def test_build_codex_argv_uses_formatted_path_without_quotes(tmp_path: Path) -> None:
     req = ReviewRequest(prompt="x", cd=tmp_path)
-    cmd = _build_cmd(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path)
     assert "--cd" in cmd
     cd_arg = cmd[cmd.index("--cd") + 1]
     assert '"' not in cd_arg
     assert "'" not in cd_arg
 
 
-def test_build_cmd_image_relative_to_codex_cd(tmp_path: Path) -> None:
+def test_build_codex_argv_image_relative_to_codex_workdir(tmp_path: Path) -> None:
     req = ReviewRequest(prompt="x", cd=tmp_path, image=[Path("shot.png")])
-    cmd = _build_cmd(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path)
     assert "--image" in cmd
     img = cmd[cmd.index("--image") + 1]
     assert img == os.path.normpath(str(tmp_path / "shot.png"))
@@ -269,14 +270,14 @@ def test_build_cmd_image_relative_to_codex_cd(tmp_path: Path) -> None:
 # 即 resume 子命令必须排在所有 flag **之后**。
 
 
-def test_build_cmd_initial_review_has_no_resume(tmp_path: Path) -> None:
+def test_build_codex_argv_initial_review_has_no_resume(tmp_path: Path) -> None:
     """初审：session_id 为空 → argv 不得出现 resume。"""
     req = ReviewRequest(prompt="x", cd=tmp_path, session_id="")
-    cmd = _build_cmd(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path)
     assert "resume" not in cmd
 
 
-def test_build_cmd_re_review_appends_resume_after_all_flags(tmp_path: Path) -> None:
+def test_build_codex_argv_re_review_appends_resume_after_all_flags(tmp_path: Path) -> None:
     """复审：resume <id> 必须是 argv 末尾，且排在每一个 flag 之后。"""
     sid = "01234567-89ab-cdef-0123-456789abcdef"
     req = ReviewRequest(
@@ -287,7 +288,7 @@ def test_build_cmd_re_review_appends_resume_after_all_flags(tmp_path: Path) -> N
         profile="prof",
         yolo=True,
     )
-    cmd = _build_cmd(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path)
 
     assert cmd[:2] == ["codex", "exec"]
     # resume 与 id 相邻且收尾
@@ -299,10 +300,10 @@ def test_build_cmd_re_review_appends_resume_after_all_flags(tmp_path: Path) -> N
             assert i < resume_at, f"flag {token!r} 排在 resume 之后，CLI 会拒绝"
 
 
-def test_build_cmd_re_review_keeps_sandbox_and_cd(tmp_path: Path) -> None:
+def test_build_codex_argv_re_review_keeps_sandbox_and_cd(tmp_path: Path) -> None:
     """复审不得丢掉沙箱策略与工作目录 —— 只读边界在复审同样生效。"""
     req = ReviewRequest(prompt="x", cd=tmp_path, session_id="abc-123")
-    cmd = _build_cmd(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path)
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
     assert cmd[cmd.index("--cd") + 1] == format_cli_path(tmp_path)
 
@@ -411,26 +412,28 @@ async def test_file_as_workdir_is_invalid(tmp_path: Path) -> None:
     assert result.error_kind == "invalid_path"
 
 
-def test_path_chain_has_reparse_walks_up_to_ancestor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_path_chain_has_reparse_walks_up_to_ancestor(tmp_path: Path) -> None:
     """reparse 在祖先上时子路径也不可信；且不得因 exists()=False 漏检。
 
     只在祖先上打标，叶子与中间层都不是 reparse —— 断言真的走了整条链，
     而不是仅仅证明「A 调用了 B」。
+    组合经 self：子类按方法粒度替换叶子原语即可测组合逻辑，
+    无需 monkeypatch 模块符号。
     """
-    # 被测单元是 WinApiSecurity 自身：链式走查由它的两个内部原语组合而成，
-    # 所以在 winsec 模块内替换叶子谓词是「测 adapter 的组合」，不是穿模块。
-    from codex_mcp_cyber import winsec
+    from codex_mcp_cyber.winsec import WinApiSecurity
 
     ancestor = tmp_path / "reparse-ancestor"
     # 叶子与中间层都不存在：走链必须靠 lstat 而非 exists()
     leaf = ancestor / "mid" / "leaf"
-    monkeypatch.setattr(winsec, "_is_reparse_point", lambda p: p == ancestor)
 
-    assert winsec._path_chain_has_reparse(leaf) is True
+    class _AncestorReparse(WinApiSecurity):
+        def is_reparse_point(self, path: Path) -> bool:
+            return path == ancestor
+
+    sec = _AncestorReparse()
+    assert sec.path_chain_has_reparse(leaf) is True
     # 负例：同级另一棵树上无 reparse，必须为 False（否则上面的 True 无意义）
-    assert winsec._path_chain_has_reparse(tmp_path / "clean" / "leaf") is False
+    assert sec.path_chain_has_reparse(tmp_path / "clean" / "leaf") is False
 
 
 def test_missing_path_is_not_reparse(tmp_path: Path) -> None:
@@ -640,12 +643,20 @@ def test_normalize_tilde_without_home_is_invalid(monkeypatch: pytest.MonkeyPatch
 @pytest.mark.skipif(os.name != "nt", reason="icacls is Windows-only")
 def test_restrict_acl_rejects_foreign_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     from codex_mcp_cyber import winsec
+    from codex_mcp_cyber.winsec import WinApiSecurity
 
-    # 被测单元是 adapter 自身的 owner 闸门：owner != me 时必须 fail-closed
-    monkeypatch.setattr(winsec, "_current_user_sid", lambda: "S-1-5-21-me")
-    monkeypatch.setattr(winsec, "_path_owner_sid", lambda p: "S-1-5-21-attacker")
+    # 被测单元是 adapter 自身的 owner 闸门：owner != me 时必须 fail-closed。
+    # 叶子原语经 self 组合，子类替换即可；lexists 是 OS 边界，仍走 monkeypatch。
+    class _ForeignOwner(WinApiSecurity):
+        def current_user_sid(self) -> str | None:
+            return "S-1-5-21-me"
+
+        def path_owner_sid(self, path: Path) -> str | None:
+            del path
+            return "S-1-5-21-attacker"
+
     monkeypatch.setattr(winsec.os.path, "lexists", lambda p: True)
-    assert winsec._restrict_private_dir_acl(Path("C:/preowned")) is False
+    assert _ForeignOwner().restrict_private_dir_acl(Path("C:/preowned")) is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")

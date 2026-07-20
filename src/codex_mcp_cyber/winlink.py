@@ -18,6 +18,11 @@ from pathlib import Path
 from codex_mcp_cyber.paths import normalize_workdir, path_has_non_ascii
 from codex_mcp_cyber.winsec import WinApiSecurity, WinSecurity
 
+# 纯 ASCII 缓存根目录名前缀（后接 SID 哈希）—— 单一来源。
+# skills/cc-review/codex-guide.md 的路径说明引用同一字符串，
+# 由 tests/test_contract_docs.py 互钉。
+CACHE_ROOT_PREFIX = "codex-mcp-cyber-v3-"
+
 
 def _junction_points_to(link: Path, target: Path) -> bool:
     """link 是否解析到 target（不信任仅存在）。"""
@@ -110,7 +115,9 @@ def _junction_cache_root(*, sec: WinSecurity, cache_base: Path | None = None) ->
             "A" <= drive[0].upper() <= "Z"
         ):
             raise OSError(f"非本地盘符 Windows 目录：{windir!r}")
-        candidates = [Path(drive.upper()[0] + ":\\") / f"codex-mcp-cyber-v3-{user_hash}"]
+        candidates = [
+            Path(drive.upper()[0] + ":\\") / f"{CACHE_ROOT_PREFIX}{user_hash}"
+        ]
 
     last_err: OSError | None = None
     for user_root in candidates:

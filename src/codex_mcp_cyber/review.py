@@ -1,4 +1,8 @@
-"""深 module：审核执行 — run_review(ReviewRequest) → ReviewResult；to_wire 映射冻结 wire。"""
+"""深 module：审核执行 — run_review(ReviewRequest) → ReviewResult；to_wire 映射冻结 wire。
+
+编排职责：归一工作目录、构造 argv、驱动 runner seam、重试、metrics、终局装配。
+行流折叠与终态判类在 stream；错误人话文案在 errors.display_error。
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -16,6 +20,7 @@ from codex_mcp_cyber.errors import (
     CommandNotFoundError,
     ErrorKind,
     build_error_detail,
+    display_error,
 )
 from codex_mcp_cyber.paths import (
     InvalidWorkdirError,
@@ -24,7 +29,7 @@ from codex_mcp_cyber.paths import (
 )
 from codex_mcp_cyber.process import CodexProcessRunner, PopenCodexRunner
 from codex_mcp_cyber.winlink import prefer_codex_workdir
-from codex_mcp_cyber.stream import finalize_stream_outcome, reduce_codex_stream
+from codex_mcp_cyber.stream import StreamOutcome, reduce_codex_stream
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -50,7 +55,11 @@ class ReviewRequest:
 
 @dataclass
 class ReviewResult:
-    """一次审核执行的领域结局（非 wire dict）。"""
+    """一次审核执行的领域结局（非 wire dict）。
+
+    ``real_workdir``：归一后的真实仓库路径（对外报告用）——不是交给
+    Codex 的审核别名（见 CONTEXT.md「工作目录」词条）。
+    """
 
     success: bool
     text: str = ""
@@ -59,7 +68,7 @@ class ReviewResult:
     error_message: str = ""
     error_detail: Optional[Dict[str, Any]] = None
     duration_ms: int = 0
-    workdir: Optional[Path] = None
+    real_workdir: Optional[Path] = None
     metrics: Optional[Dict[str, Any]] = None
     all_messages: Optional[list[dict[str, Any]]] = None
 
@@ -152,35 +161,6 @@ def _finish(
     return result
 
 
-def _display_error(result: ReviewResult) -> str:
-    """wire 用人类可读错误文案；领域结局只保留 error_message。"""
-    raw = result.error_message or ""
-    if result.error_kind == ErrorKind.AUTH_REQUIRED:
-        return (
-            "请先登录 Codex CLI。运行以下命令完成认证：\n"
-            "  codex login\n"
-            "\n"
-            "或使用 API Key 认证：\n"
-            "  printenv OPENAI_API_KEY | codex login --with-api-key\n"
-            "\n" + raw
-        )
-    if result.error_kind == ErrorKind.INVALID_PATH:
-        path_line = (
-            f"已归一化路径：{result.workdir}\n" if result.workdir is not None else ""
-        )
-        return (
-            "工作目录路径非法或 Codex 在访问路径时触发 Windows os error 123。\n"
-            f"{path_line}"
-            "常见原因：\n"
-            "1) cd 被包了字面引号（应传裸路径：C:/Users/you/project）\n"
-            "2) 中文/非 ASCII 路径下 Codex 内部工具解析失败"
-            "（本工具会尝试建 ASCII 目录联接；若仍失败，请把仓库放到纯英文路径）\n"
-            "3) 路径不存在或含非法尾部空格/点\n"
-            "\n" + raw
-        )
-    return raw
-
-
 def to_wire(result: ReviewResult) -> Dict[str, Any]:
     """ReviewResult → 冻结 MCP wire dict。"""
     duration = format_duration_ms(result.duration_ms)
@@ -196,7 +176,11 @@ def to_wire(result: ReviewResult) -> Dict[str, Any]:
         out = {
             "success": False,
             "tool": "codex",
-            "error": _display_error(result),
+            "error": display_error(
+                error_kind=result.error_kind,
+                error_message=result.error_message,
+                real_workdir=result.real_workdir,
+            ),
             "error_kind": result.error_kind,
             "error_detail": result.error_detail
             or build_error_detail(result.error_message or "未知错误"),
@@ -209,15 +193,22 @@ def to_wire(result: ReviewResult) -> Dict[str, Any]:
     return out
 
 
-def _build_cmd(req: ReviewRequest, cd_path: Path) -> list[str]:
-    # list argv：路径本身不再包引号；format_cli_path 保证 Windows 原生形态。
+def build_codex_argv(req: ReviewRequest, codex_workdir: Path) -> list[str]:
+    """审核请求 → Codex CLI argv（编码侧协议的单一来源）。
+
+    初审（会话标识为空）：不追加 resume。
+    复审（会话标识非空）：``resume <会话标识>`` 缀在**所有** flag 之后。
+    路径一律裸串（list argv 不包引号；format_cli_path 保证 Windows 原生形态）；
+    ``--image`` 相对审核别名解析，不落到 MCP 服务 cwd。
+    argv[0] 是命令名 codex，可执行体绝对路径由生产 adapter 解析改写。
+    """
     cmd = [
         "codex",
         "exec",
         "--sandbox",
         req.sandbox,
         "--cd",
-        format_cli_path(cd_path),
+        format_cli_path(codex_workdir),
         "--json",
     ]
     image_list = (
@@ -226,11 +217,12 @@ def _build_cmd(req: ReviewRequest, cd_path: Path) -> list[str]:
         else ([req.image] if isinstance(req.image, (str, Path)) else [])
     )
     if image_list:
-        # 相对图片路径相对审核目录（codex_cd），不是 MCP 服务 cwd
         cmd.extend(
             [
                 "--image",
-                ",".join(format_cli_path(Path(p), base=cd_path) for p in image_list),
+                ",".join(
+                    format_cli_path(Path(p), base=codex_workdir) for p in image_list
+                ),
             ]
         )
     if req.model:
@@ -252,89 +244,6 @@ def _maybe_messages(
     return all_messages if req.return_all_messages else None
 
 
-@dataclass
-class _AttemptOutcome:
-    """一次行流尝试的内部结局（成功 / 失败 / 超时同型）。不导出。"""
-
-    success: bool
-    text: str = ""
-    session_id: Optional[str] = None
-    error_kind: Optional[str] = None
-    error_message: str = ""
-    exit_code: Optional[int] = None
-    raw_output_lines: int = 0
-    json_decode_errors: int = 0
-    last_lines: list[str] = field(default_factory=list)
-    all_messages: list[dict[str, Any]] = field(default_factory=list)
-
-
-def _run_attempt(
-    runner: CodexProcessRunner,
-    cmd: list[str],
-    *,
-    prompt: str,
-    workdir: Path | str | None,
-    timeout: int,
-    max_duration: int,
-    collect_messages: bool,
-) -> _AttemptOutcome:
-    """执行一次 runner 调用并归约。CommandNotFoundError 向上抛出。"""
-    outcome = runner.run(
-        cmd,
-        prompt=prompt,
-        workdir=workdir,
-        timeout=timeout,
-        max_duration=max_duration,
-    )
-
-    # 单通道超时：只 reduce，不 finalize。
-    # 理由：finalize 会按「无 session_id / 无正文 / 退出码非零」补判错误种类，
-    # 而超时终局本就没有 session_id 与正文 —— 跑 finalize 会把 timeout
-    # 覆写成 protocol_missing_session 或 empty_result，丢掉真正的失败原因。
-    # 超时的种类已由 outcome.terminal 决定，不需要也不允许再补判。
-    if outcome.terminal in ("timeout", "idle_timeout"):
-        partial = list(outcome.lines)
-        if partial:
-            stream = reduce_codex_stream(partial, collect_messages=collect_messages)
-            last_lines = stream.last_lines
-            json_decode_errors = stream.json_decode_errors
-            all_messages = stream.all_messages
-        else:
-            last_lines = []
-            json_decode_errors = 0
-            all_messages = []
-        kind = (
-            ErrorKind.IDLE_TIMEOUT
-            if outcome.terminal == "idle_timeout"
-            else ErrorKind.TIMEOUT
-        )
-        return _AttemptOutcome(
-            success=False,
-            error_kind=kind,
-            error_message=outcome.error_message or "timeout",
-            exit_code=None,
-            raw_output_lines=outcome.raw_output_lines or len(partial),
-            json_decode_errors=json_decode_errors,
-            last_lines=last_lines,
-            all_messages=all_messages,
-        )
-
-    stream = reduce_codex_stream(outcome.lines, collect_messages=collect_messages)
-    stream = finalize_stream_outcome(stream, exit_code=outcome.exit_code)
-    return _AttemptOutcome(
-        success=not stream.had_error,
-        text=stream.text,
-        session_id=stream.session_id,
-        error_kind=stream.error_kind,
-        error_message=stream.error_message,
-        exit_code=outcome.exit_code,
-        raw_output_lines=outcome.raw_output_lines,
-        json_decode_errors=stream.json_decode_errors,
-        last_lines=stream.last_lines,
-        all_messages=stream.all_messages,
-    )
-
-
 async def run_review(
     req: ReviewRequest,
     runner: CodexProcessRunner | None = None,
@@ -353,7 +262,7 @@ async def run_review(
     # 2) 必须是已存在的目录
     # 3) 交给 Codex 时优先 ASCII 联接别名（Windows 中文路径防 123）
     try:
-        cd_path = normalize_workdir(req.cd)
+        real_workdir = normalize_workdir(req.cd)
     except InvalidWorkdirError as e:
         msg = f"{e}\n（原始输入：{req.cd!r}）"
         return _finish(
@@ -368,9 +277,9 @@ async def run_review(
             retries=0,
         )
 
-    if not cd_path.is_dir():
+    if not real_workdir.is_dir():
         msg = (
-            f"工作目录不存在或不是目录：{cd_path}\n"
+            f"工作目录不存在或不是目录：{real_workdir}\n"
             f"（原始输入：{req.cd!r}）"
         )
         return _finish(
@@ -381,30 +290,30 @@ async def run_review(
                 error_kind=ErrorKind.INVALID_PATH,
                 error_message=msg,
                 error_detail=build_error_detail(msg),
-                workdir=cd_path,
+                real_workdir=real_workdir,
             ),
             retries=0,
         )
 
-    codex_cd = prefer_codex_workdir(cd_path)
-    cmd = _build_cmd(req, codex_cd)
-    # 子进程 cwd 也设为审核目录，让 Codex 子工具的相对路径解析落在同一处
+    # 审核别名：实际交给 Codex 的工作目录 —— 非 ASCII 时为 ASCII 联接别名，
+    # 否则就是真实仓库路径。领域结局对外报告一律用真实仓库路径。
+    codex_workdir = prefer_codex_workdir(real_workdir)
+    cmd = build_codex_argv(req, codex_workdir)
+    # 子进程 cwd 也设为审核别名，让 Codex 子工具的相对路径解析落在同一处
     #（ASCII 联接时尤其重要）。经 run(...) 传入 —— 它是 seam 的一部分，
     # 不是某个具体 adapter 的字段。
     max_retries = max(0, req.max_retries)
     retries = 0
-    last: _AttemptOutcome | None = None
+    last: StreamOutcome | None = None
 
     while retries <= max_retries:
         try:
-            attempt = _run_attempt(
-                active_runner,
+            proc = active_runner.run(
                 cmd,
                 prompt=req.prompt,
-                workdir=codex_cd,
+                workdir=codex_workdir,
                 timeout=req.timeout,
                 max_duration=req.max_duration,
-                collect_messages=req.return_all_messages,
             )
         except CommandNotFoundError as e:
             return _finish(
@@ -415,7 +324,7 @@ async def run_review(
                     error_kind=ErrorKind.COMMAND_NOT_FOUND,
                     error_message=str(e),
                     error_detail=build_error_detail(str(e)),
-                    workdir=cd_path,
+                    real_workdir=real_workdir,
                 ),
                 retries=retries,
             )
@@ -431,12 +340,18 @@ async def run_review(
                     error_kind=kind,
                     error_message=msg,
                     error_detail=build_error_detail(msg),
-                    workdir=cd_path,
+                    real_workdir=real_workdir,
                 ),
                 retries=retries,
             )
 
-        if attempt.success:
+        # 折叠 + 终态判类都在 stream 的单入口里（超时不得 finalize 的
+        # 不变量属于 stream 实现，编排层不再分流）。
+        attempt = reduce_codex_stream(
+            proc, collect_messages=req.return_all_messages
+        )
+
+        if not attempt.had_error:
             return _finish(
                 req,
                 ts_start,
@@ -444,7 +359,7 @@ async def run_review(
                     success=True,
                     text=attempt.text,
                     session_id=attempt.session_id,
-                    workdir=cd_path,
+                    real_workdir=real_workdir,
                     all_messages=_maybe_messages(req, attempt.all_messages),
                 ),
                 retries=retries,
@@ -487,7 +402,7 @@ async def run_review(
             error_kind=last.error_kind,
             error_message=last.error_message,
             error_detail=detail,
-            workdir=cd_path,
+            real_workdir=real_workdir,
             all_messages=_maybe_messages(req, last.all_messages),
         ),
         result_text=last.text,

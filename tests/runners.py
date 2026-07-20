@@ -10,14 +10,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from codex_mcp_cyber.process import ProcessOutcome, Terminal
+from codex_mcp_cyber.stream import ProcessOutcome, Terminal
 
 
 @dataclass
 class ScriptedLinesRunner:
     """测试 adapter：回放固定行序列，不碰 OS。
 
-    记录每次调用收到的 workdir，供「workdir 确实穿过 seam」类断言使用。
+    记录每次调用收到的 workdir 与 cmd，供「workdir / argv 确实穿过 seam」
+    类断言使用。
     """
 
     lines: list[str]
@@ -26,6 +27,7 @@ class ScriptedLinesRunner:
     error_message: str = ""
     calls: int = 0
     seen_workdirs: list[Path | str | None] = field(default_factory=list)
+    seen_cmds: list[list[str]] = field(default_factory=list)
 
     def run(
         self,
@@ -36,9 +38,10 @@ class ScriptedLinesRunner:
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
-        del cmd, prompt, timeout, max_duration
+        del prompt, timeout, max_duration
         self.calls += 1
         self.seen_workdirs.append(workdir)
+        self.seen_cmds.append(list(cmd))
         lines = list(self.lines)
         raw = sum(1 for line in lines if line)
         return ProcessOutcome(
@@ -57,6 +60,7 @@ class SequenceRunner:
     steps: list[ProcessOutcome]
     calls: int = 0
     seen_workdirs: list[Path | str | None] = field(default_factory=list)
+    seen_cmds: list[list[str]] = field(default_factory=list)
 
     def run(
         self,
@@ -67,10 +71,11 @@ class SequenceRunner:
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
-        del cmd, prompt, timeout, max_duration
+        del prompt, timeout, max_duration
         if self.calls >= len(self.steps):
             raise RuntimeError("SequenceRunner exhausted")
         step = self.steps[self.calls]
         self.calls += 1
         self.seen_workdirs.append(workdir)
+        self.seen_cmds.append(list(cmd))
         return step

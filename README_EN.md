@@ -187,9 +187,9 @@ git clone https://github.com/ZeroStarlet/codex-mcp-cyber.git
 cd codex-mcp-cyber
 uv sync
 
-# remote (tracks latest)
+# remote (tracks latest; --refresh matches the setup scripts, avoids stale uvx cache)
 claude mcp add codex-mcp-cyber --scope user --transport stdio -- \
-  uvx --from git+https://github.com/ZeroStarlet/codex-mcp-cyber.git codex-mcp-cyber
+  uvx --refresh --from git+https://github.com/ZeroStarlet/codex-mcp-cyber.git codex-mcp-cyber
 
 # local development
 claude mcp add codex-mcp-cyber --scope user --transport stdio -- \

@@ -1,4 +1,4 @@
-"""行流归约 / 脱敏 / 谓词。"""
+"""行流归约（终态感知单入口）/ 脱敏 / 谓词。"""
 
 from __future__ import annotations
 
@@ -7,10 +7,39 @@ import json
 from codex_mcp_cyber.errors import ErrorKind, build_error_detail
 from codex_mcp_cyber.redact import filter_last_lines, redact_tool_result_event
 from codex_mcp_cyber.stream import (
-    finalize_stream_outcome,
+    ProcessOutcome,
     is_turn_completed_line,
     reduce_codex_stream,
 )
+
+
+def _po(
+    lines: list[str],
+    *,
+    exit_code: int | None = 0,
+    terminal: str = "completed",
+    error_message: str = "",
+) -> ProcessOutcome:
+    return ProcessOutcome(
+        lines=list(lines),
+        exit_code=exit_code,
+        raw_output_lines=sum(1 for x in lines if x),
+        terminal=terminal,  # type: ignore[arg-type]
+        error_message=error_message,
+    )
+
+
+def _ok_lines(text: str = "OK", thread_id: str = "sess-1") -> list[str]:
+    return [
+        json.dumps({"type": "thread.started", "thread_id": thread_id}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": text},
+            }
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
 
 
 def _fat_tool_result_event(secret: str = "SECRET-BLOB-DO-NOT-LEAK") -> dict:
@@ -25,11 +54,67 @@ def _fat_tool_result_event(secret: str = "SECRET-BLOB-DO-NOT-LEAK") -> dict:
 
 def test_reduce_prioritizes_invalid_path_over_protocol() -> None:
     stream = reduce_codex_stream(
-        ["Error: The filename, directory name, or volume label syntax is incorrect. (os error 123)"]
+        _po(
+            [
+                "Error: The filename, directory name, or volume label syntax is incorrect. (os error 123)"
+            ],
+            exit_code=1,
+        )
     )
-    stream = finalize_stream_outcome(stream, exit_code=1)
     assert stream.error_kind == ErrorKind.INVALID_PATH
     assert stream.had_error is True
+
+def test_reduce_completed_success_carries_exit_and_raw() -> None:
+    stream = reduce_codex_stream(_po(_ok_lines("OK")))
+    assert stream.had_error is False
+    assert stream.text == "OK"
+    assert stream.session_id == "sess-1"
+    assert stream.exit_code == 0
+    assert stream.raw_output_lines == 3
+
+def test_reduce_timeout_partial_looking_successful_stays_timeout() -> None:
+    """超时 partial 即使像完整成功 JSONL，也不得 finalize 成 success。
+
+    该不变量属于 stream 实现（终态感知单入口），在接口上直测。
+    """
+    lines = _ok_lines("SHOULD-NOT-WIN", thread_id="sess-partial")
+    stream = reduce_codex_stream(
+        _po(lines, exit_code=None, terminal="idle_timeout", error_message="idle timeout")
+    )
+    assert stream.had_error is True
+    assert stream.error_kind == ErrorKind.IDLE_TIMEOUT
+    assert stream.error_kind != ErrorKind.PROTOCOL_MISSING_SESSION
+    assert stream.text == ""
+    assert stream.session_id is None
+    assert stream.exit_code is None
+    assert stream.error_message == "idle timeout"
+    assert stream.last_lines == lines
+
+def test_reduce_total_timeout_maps_to_timeout_kind() -> None:
+    stream = reduce_codex_stream(
+        _po(["partial"], exit_code=None, terminal="timeout", error_message="")
+    )
+    assert stream.error_kind == ErrorKind.TIMEOUT
+    # error_message 为空时落默认 "timeout"
+    assert stream.error_message == "timeout"
+    assert stream.raw_output_lines == 1
+
+def test_reduce_timeout_still_collects_diagnostics() -> None:
+    """超时终局仍折叠诊断信息：last_lines / json_decode_errors / all_messages（脱敏）。"""
+    secret = "TIMEOUT-SECRET"
+    lines = [
+        json.dumps(_fat_tool_result_event(secret), ensure_ascii=False),
+        "not-json-line",
+    ]
+    stream = reduce_codex_stream(
+        _po(lines, exit_code=None, terminal="idle_timeout", error_message="idle"),
+        collect_messages=True,
+    )
+    assert stream.error_kind == ErrorKind.IDLE_TIMEOUT
+    assert stream.json_decode_errors == 1
+    assert stream.last_lines == lines
+    blob = json.dumps(stream.all_messages, ensure_ascii=False)
+    assert secret not in blob
 
 def test_redact_tool_result_event_truncates_only_tool_result() -> None:
     fat = _fat_tool_result_event()
@@ -84,4 +169,3 @@ def test_is_turn_completed_line_predicate() -> None:
     assert is_turn_completed_line("not-json") is False
     assert is_turn_completed_line(json.dumps(["turn.completed"])) is False
     assert is_turn_completed_line(json.dumps({"type": None})) is False
-

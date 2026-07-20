@@ -171,7 +171,7 @@ def format_cli_path(path: Path, *, base: Path | None = None) -> str:
     list argv 不加引号。**不要** Path.resolve()——会跟随目录联接抵消 ASCII 别名。
 
     base：若 path 为相对路径，相对 base 解析（默认 os.getcwd()）。
-    审核场景应传入 codex_cd，避免图片落到 MCP 服务 cwd。
+    审核场景应传入审核别名（codex_workdir），避免图片落到 MCP 服务 cwd。
     """
     raw = os.path.normpath(str(path))
     if not os.path.isabs(raw):

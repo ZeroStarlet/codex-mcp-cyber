@@ -32,6 +32,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
+from codex_mcp_cyber.classify import looks_like_invalid_path_error  # noqa: E402
 from codex_mcp_cyber.paths import path_has_non_ascii  # noqa: E402
 from codex_mcp_cyber.tools.codex import codex_tool  # noqa: E402
 from codex_mcp_cyber.winlink import prefer_codex_workdir  # noqa: E402
@@ -60,11 +61,9 @@ async def run_case(
     )
     detail = result.get("error_detail") or {}
     last_lines = detail.get("last_lines") or []
-    has_123 = any(
-        "os error 123" in str(x) or "文件名、目录名或卷标语法不正确" in str(x)
-        for x in last_lines
-    )
-    has_123 = has_123 or ("os error 123" in str(result.get("error") or ""))
+    # 123 特征判定复用 classify 的单一来源，避免与生产判定各自漂移
+    has_123 = any(looks_like_invalid_path_error(str(x)) for x in last_lines)
+    has_123 = has_123 or looks_like_invalid_path_error(str(result.get("error") or ""))
     return {
         "case": name,
         "cd_repr": repr(cd_value) if not isinstance(cd_value, Path) else f"Path({cd_value!s})",
@@ -101,7 +100,7 @@ async def main() -> int:
 
     print(f"workdir={workdir}")
     print(f"non_ascii={path_has_non_ascii(workdir)}")
-    print(f"preferred_codex_cd={preferred}")
+    print(f"preferred_codex_workdir={preferred}")
     print(f"plain_cd={plain!r}")
     print(f"quoted_cd={quoted!r}")
     print("---")

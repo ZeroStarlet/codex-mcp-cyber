@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-mcp-cyber"
-version = "0.3.0"
+version = "0.4.0"
 description = "Claude + Codex 代码审查 MCP 服务器"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,7 +28,7 @@ classifiers = [
 Homepage = "https://github.com/ZeroStarlet/codex-mcp-cyber"
 
 [project.scripts]
-codex-mcp-cyber = "codex_mcp_cyber.cli:main"
+codex-mcp-cyber = "codex_mcp_cyber.server:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codex_mcp_cyber"]

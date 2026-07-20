@@ -187,9 +187,9 @@ git clone https://github.com/ZeroStarlet/codex-mcp-cyber.git
 cd codex-mcp-cyber
 uv sync
 
-# 远程（自动拉最新）
+# 远程（自动拉最新；--refresh 与 setup 脚本一致，避免 uvx 用旧缓存）
 claude mcp add codex-mcp-cyber --scope user --transport stdio -- \
-  uvx --from git+https://github.com/ZeroStarlet/codex-mcp-cyber.git codex-mcp-cyber
+  uvx --refresh --from git+https://github.com/ZeroStarlet/codex-mcp-cyber.git codex-mcp-cyber
 
 # 本地开发
 claude mcp add codex-mcp-cyber --scope user --transport stdio -- \

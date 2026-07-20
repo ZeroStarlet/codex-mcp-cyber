@@ -1,4 +1,9 @@
-"""行流 seam：Codex 进程执行 adapter。"""
+"""行流 seam：Codex 进程执行 adapter。
+
+行流词汇（``ProcessOutcome`` / ``Terminal``）定义在 stream；本模块只放
+seam 声明（``CodexProcessRunner``）与生产 adapter（``PopenCodexRunner``）。
+历史导入路径 ``codex_mcp_cyber.process.ProcessOutcome`` 经由本导入仍然可用。
+"""
 
 from __future__ import annotations
 
@@ -7,25 +12,12 @@ import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError
 from codex_mcp_cyber.paths import format_cli_path
-
-Terminal = Literal["completed", "timeout", "idle_timeout"]
-
-
-@dataclass(frozen=True)
-class ProcessOutcome:
-    """一次进程执行的行流结果（含超时终态；单通道）。"""
-
-    lines: list[str]
-    exit_code: Optional[int]
-    raw_output_lines: int
-    terminal: Terminal = "completed"
-    error_message: str = ""
+from codex_mcp_cyber.stream import ProcessOutcome, Terminal, is_turn_completed_line
 
 
 class CodexProcessRunner(Protocol):
@@ -98,8 +90,6 @@ class PopenCodexRunner:
     def _resolve_terminal_predicate(self) -> Callable[[str], bool]:
         if self.is_terminal_line is not None:
             return self.is_terminal_line
-        from codex_mcp_cyber.stream import is_turn_completed_line
-
         return is_turn_completed_line
 
     def _resolve_codex_path(self, cmd: list[str]) -> list[str]:
