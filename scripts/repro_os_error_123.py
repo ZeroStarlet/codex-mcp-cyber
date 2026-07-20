@@ -35,7 +35,6 @@ _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
 from codex_mcp_cyber.classify import looks_like_invalid_path_error  # noqa: E402
-from codex_mcp_cyber.paths import path_has_non_ascii  # noqa: E402
 from codex_mcp_cyber.tools.codex import codex_tool  # noqa: E402
 
 
@@ -99,7 +98,7 @@ async def main() -> int:
     quoted = _quoted(workdir)
 
     print(f"workdir={workdir}")
-    print(f"non_ascii={path_has_non_ascii(workdir)}")
+    print(f"non_ascii={any(ord(ch) > 127 for ch in str(workdir))}")
     print(f"plain_cd={plain!r}")
     print(f"quoted_cd={quoted!r}")
     print("---")

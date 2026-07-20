@@ -21,7 +21,7 @@ from typing import Any, Literal, Optional
 
 from codex_mcp_cyber.classify import is_auth_error, looks_like_invalid_path_error
 from codex_mcp_cyber.errors import ErrorKind
-from codex_mcp_cyber.redact import LAST_LINES_LIMIT, redact_tool_result_event
+from codex_mcp_cyber.redact import redact_tool_result_event, tail_window
 
 Terminal = Literal["completed", "timeout", "idle_timeout"]
 
@@ -53,6 +53,8 @@ class StreamOutcome:
     had_error: bool = False
     error_message: str = ""
     error_kind: Optional[str] = None
+    # 分类证据（非展示）：折叠期错误文本命中过 os error 123 特征。
+    saw_invalid_path_text: bool = False
     exit_code: Optional[int] = None
     raw_output_lines: int = 0
     json_decode_errors: int = 0
@@ -121,6 +123,17 @@ def _require_str(value: Any, label: str) -> str:
     return value
 
 
+def _note_error_text(out: StreamOutcome, text: str) -> None:
+    """错误文本唯一入口：进展示通道，同时即时抽取 123 分类证据。
+
+    证据在入口处一次判定，finalize 只读字段 —— 不得对拼好的
+    error_message 正则回扫（0.5.1 事故的机制根源）。
+    """
+    out.error_message += text
+    if looks_like_invalid_path_error(text):
+        out.saw_invalid_path_text = True
+
+
 def _fold_ok_event(
     out: StreamOutcome,
     line_dict: dict[str, Any],
@@ -167,7 +180,7 @@ def _fold_ok_event(
         if err_obj is None or not isinstance(err_obj, dict):
             raise TypeError(f"expected error object, got {type(err_obj).__name__}")
         fail_msg = _require_str(err_obj.get("message", ""), "error.message")
-        out.error_message += "\n\n[codex error] " + fail_msg
+        _note_error_text(out, "\n\n[codex error] " + fail_msg)
         if is_auth_error(fail_msg):
             out.error_kind = ErrorKind.AUTH_REQUIRED
         elif out.error_kind != ErrorKind.AUTH_REQUIRED:
@@ -180,7 +193,7 @@ def _fold_ok_event(
         )
         if not is_reconnecting:
             out.had_error = True
-            out.error_message += "\n\n[codex error] " + error_msg
+            _note_error_text(out, "\n\n[codex error] " + error_msg)
             if is_auth_error(error_msg):
                 out.error_kind = ErrorKind.AUTH_REQUIRED
             elif out.error_kind != ErrorKind.AUTH_REQUIRED:
@@ -194,19 +207,19 @@ def _fold_lines(
 ) -> StreamOutcome:
     """把一行流行列折叠成结构化结局（不含终态与 finalize 判定）。"""
     out = StreamOutcome()
+    processed = 0
     for line in lines:
-        out.last_lines.append(line)
-        if len(out.last_lines) > LAST_LINES_LIMIT:
-            out.last_lines.pop(0)
+        processed += 1
 
         decoded = _decode_line(line)
         if isinstance(decoded, _JsonDecode):
             out.json_decode_errors += 1
-            out.error_message += "\n\n[json decode error] " + decoded.line
+            _note_error_text(out, "\n\n[json decode error] " + decoded.line)
             continue
         if isinstance(decoded, _Malformed):
-            out.error_message += (
-                f"\n\n[unexpected error] {decoded.error}. Line: {decoded.line!r}"
+            _note_error_text(
+                out,
+                f"\n\n[unexpected error] {decoded.error}. Line: {decoded.line!r}",
             )
             out.had_error = True
             out.error_kind = ErrorKind.UNEXPECTED_EXCEPTION
@@ -215,11 +228,13 @@ def _fold_lines(
         try:
             _fold_ok_event(out, decoded.data, collect_messages=collect_messages)
         except Exception as error:  # noqa: BLE001 — 畸形事件 → unexpected_exception
-            out.error_message += f"\n\n[unexpected error] {error}. Line: {line!r}"
+            _note_error_text(out, f"\n\n[unexpected error] {error}. Line: {line!r}")
             out.had_error = True
             out.error_kind = ErrorKind.UNEXPECTED_EXCEPTION
             break
 
+    # 诊断窗口对「已处理行」开一次（畸形 break 后的未处理行不入窗，语义不变）。
+    out.last_lines = tail_window(lines[:processed])
     return out
 
 
@@ -229,13 +244,12 @@ def _finalize_stream_outcome(
     exit_code: Optional[int],
 ) -> StreamOutcome:
     """在归约结果上叠加 success 判定用的错误优先级（仅 completed 终态）。"""
-    # 123 文本特征只对「最终未取得会话标识」的行流定罪：子工具（如 rg）向
+    # 123 证据只对「最终未取得会话标识」的行流定罪：子工具（如 rg）向
     # 合流 stdout 吐的 os error 123 纯文本命中同一特征，而已建会话的运行
     # 显然不是工作目录非法（生产事故：成功审查被盖成 invalid_path 失败，
-    # wire 丢会话标识与结论）。
-    if stream.session_id is None and looks_like_invalid_path_error(
-        stream.error_message
-    ):
+    # wire 丢会话标识与结论）。证据由 _note_error_text 在入口抽取，
+    # 此处只读字段。
+    if stream.session_id is None and stream.saw_invalid_path_text:
         stream.error_kind = ErrorKind.INVALID_PATH
         stream.had_error = True
 

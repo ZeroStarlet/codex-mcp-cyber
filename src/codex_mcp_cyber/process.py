@@ -12,24 +12,34 @@ import shutil
 import subprocess
 import threading
 import time
-from pathlib import Path
 from typing import Callable, Optional, Protocol
 
 from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError
-from codex_mcp_cyber.paths import format_cli_path
 from codex_mcp_cyber.stream import ProcessOutcome, Terminal, is_turn_completed_line
 
 
 class CodexProcessRunner(Protocol):
     """行流 seam：执行命令并产出 ProcessOutcome（含 timeout terminal）。
 
-    ``workdir``：子进程工作目录；None 表示继承当前进程目录。
-    它属于 interface 而非某个具体 adapter 的构造字段 —— 否则调用方得先
-    isinstance 认出具体 adapter 才能传，其余 adapter 会静默收不到。
+    ``workdir``：**已格式化的成品 OS 路径字符串**（调用方经 format_cli_path
+    一次产出，与 argv ``--cd`` 同串），adapter 原样用作子进程 cwd、不得再
+    加工；None 表示继承当前进程目录。它属于 interface 而非某个具体 adapter
+    的构造字段 —— 否则调用方得先 isinstance 认出具体 adapter 才能传，其余
+    adapter 会静默收不到。
 
     0.3.0 起 run_review 无条件传入 workdir=，未声明该参数的自定义 adapter
     会抛 TypeError。这是有意的响亮失败：静默收不到 cwd 正是本参数要消灭的
     故障模式（见 CHANGELOG.md）。
+
+    0.6.0 迁移影响：workdir 由 Path 收窄为成品字符串 —— 依赖 Path 操作
+    （resolve / 拼接子路径）的自定义 adapter 需自行 ``Path(workdir)`` 包装。
+
+    超时语义：``timeout`` = 空闲上限（秒，无输出间隔）；``max_duration`` =
+    墙钟总时长上限（秒，0 = 无限）。两类超时都**不 raise**，以
+    ``terminal="idle_timeout" | "timeout"`` 的 ProcessOutcome 返回。
+    异常模式：codex 可执行体缺失抛 CommandNotFoundError；Popen 启动失败的
+    OSError 原样穿透；注入谓词抛的 CommandTimeoutError 折成超时结局，
+    其余谓词异常原样穿透。
     """
 
     def run(
@@ -37,7 +47,7 @@ class CodexProcessRunner(Protocol):
         cmd: list[str],
         *,
         prompt: str,
-        workdir: Path | str | None = None,
+        workdir: str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome: ...
@@ -46,11 +56,11 @@ class CodexProcessRunner(Protocol):
 class PopenCodexRunner:
     """生产 adapter：真实 subprocess + 超时 + early-stop。
 
-    对外 interface 仅 ``run(...) -> ProcessOutcome``（及 ``__init__`` 的谓词注入）。
-    超时走 terminal，不 raise CommandTimeoutError。
+    对外 interface 仅 ``run(...) -> ProcessOutcome``（及 ``__init__`` 的
+    谓词 / 时钟注入）。超时走 terminal，不 raise CommandTimeoutError。
 
-    ``workdir`` 经 ``run(...)`` 传入并设为 Popen 的 cwd，使 Codex 子工具的相对路径
-    解析落在审核目录。
+    ``workdir`` 经 ``run(...)`` 传入并**原样**设为 Popen 的 cwd（seam 成品
+    字符串，不再二次格式化），使 Codex 子工具的相对路径解析落在审核目录。
     """
 
     GRACEFUL_SHUTDOWN_DELAY = 0.3
@@ -58,15 +68,19 @@ class PopenCodexRunner:
     def __init__(
         self,
         is_terminal_line: Callable[[str], bool] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.is_terminal_line = is_terminal_line
+        # internal seam：超时判定的时钟，默认真实时钟。墙钟 / 空闲两类超时
+        # 是「生产才走」的分支，测试注入可推进的假时钟才能从 run() 触达。
+        self.clock: Callable[[], float] = clock or time.time
 
     def run(
         self,
         cmd: list[str],
         *,
         prompt: str,
-        workdir: Path | str | None = None,
+        workdir: str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
@@ -108,11 +122,12 @@ class PopenCodexRunner:
         popen_cmd: list[str],
         *,
         prompt: str,
-        workdir: Path | str | None,
+        workdir: str | None,
     ) -> subprocess.Popen[str]:
+        # workdir 是 seam 成品字符串，原样用作 cwd（str() 容忍第三方 Path）。
         cwd: str | None = None
         if workdir is not None:
-            cwd = format_cli_path(Path(workdir))
+            cwd = str(workdir)
         process = subprocess.Popen(
             popen_cmd,
             shell=False,
@@ -182,14 +197,14 @@ class PopenCodexRunner:
         thread.start()
 
         lines: list[str] = []
-        start_time = time.time()
-        last_activity_time = time.time()
+        start_time = self.clock()
+        last_activity_time = self.clock()
         timeout_terminal: Terminal | None = None
         timeout_message = ""
         predicate_error: BaseException | None = None
 
         while True:
-            now = time.time()
+            now = self.clock()
             if max_duration > 0 and (now - start_time) >= max_duration:
                 timeout_terminal = "timeout"
                 timeout_message = (
@@ -209,7 +224,7 @@ class PopenCodexRunner:
                 if isinstance(item, BaseException):
                     predicate_error = item
                     break
-                last_activity_time = time.time()
+                last_activity_time = self.clock()
                 if item:
                     lines.append(item)
             except queue.Empty:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import threading
 
 import pytest
 
@@ -122,6 +124,156 @@ class _LifecycleFakeProcess:
     def kill(self) -> None:
         self.kill_calls += 1
         self._alive = False
+
+class _BlockingStdout:
+    """readline 挂起直到 close —— 模拟「进程存活但无输出」的空闲状态。"""
+
+    def __init__(self) -> None:
+        self._release = threading.Event()
+        self.closed = False
+
+    def readline(self) -> str:
+        self._release.wait()
+        return ""
+
+    def close(self) -> None:
+        self.closed = True
+        self._release.set()
+
+class _SteppingClock:
+    """按脚本推进的假时钟：依次返回给定时刻，耗尽后停在最后一刻。"""
+
+    def __init__(self, *times: float) -> None:
+        self._times = list(times)
+        self._last = times[-1]
+
+    def __call__(self) -> float:
+        if self._times:
+            self._last = self._times.pop(0)
+        return self._last
+
+class _StubbornWaitProcess(_LifecycleFakeProcess):
+    """wait 前 N 次抛 TimeoutExpired —— 驱动 terminate→kill 升级链。"""
+
+    def __init__(self, lines: list[str], *, raises: int) -> None:
+        super().__init__(lines)
+        self._raises = raises
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        if self._raises > 0:
+            self._raises -= 1
+            raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout or 0)
+        self._alive = False
+        return 0
+
+class _IgnoresTerminateProcess(_LifecycleFakeProcess):
+    """terminate 不生效、首个 wait 抛超时 —— 驱动 _cleanup 的 kill 升级。"""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__(lines)
+        self._wait_raises = 1
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1  # 不置死：模拟顽固进程
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        if self._wait_raises > 0:
+            self._wait_raises -= 1
+            raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout or 0)
+        self._alive = False
+        return 0
+
+def test_popen_idle_timeout_via_injected_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0 缺口：空闲超时分支此前零覆盖（真实时钟从 run() 不可测）。"""
+    import codex_mcp_cyber.process as process_mod
+
+    fake = _LifecycleFakeProcess([])
+    fake.stdout = _BlockingStdout()  # type: ignore[assignment]
+    monkeypatch.setattr(process_mod.shutil, "which", lambda _n: "codex-fake")
+    monkeypatch.setattr(process_mod.subprocess, "Popen", lambda *a, **k: fake)  # noqa: ARG005
+    runner = PopenCodexRunner(clock=_SteppingClock(0.0, 0.0, 31.0))
+    outcome = runner.run(["codex", "exec"], prompt="hi", timeout=30, max_duration=0)
+    assert outcome.terminal == "idle_timeout"
+    assert "空闲超时" in outcome.error_message
+    assert outcome.exit_code is None
+    assert fake.terminate_calls >= 1
+    assert fake.stdout.closed is True
+
+def test_popen_wall_clock_timeout_via_injected_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0 缺口：墙钟总时长超时分支此前零覆盖。"""
+    import codex_mcp_cyber.process as process_mod
+
+    fake = _LifecycleFakeProcess([])
+    fake.stdout = _BlockingStdout()  # type: ignore[assignment]
+    monkeypatch.setattr(process_mod.shutil, "which", lambda _n: "codex-fake")
+    monkeypatch.setattr(process_mod.subprocess, "Popen", lambda *a, **k: fake)  # noqa: ARG005
+    runner = PopenCodexRunner(clock=_SteppingClock(0.0, 0.0, 61.0))
+    outcome = runner.run(["codex", "exec"], prompt="hi", timeout=1000, max_duration=60)
+    assert outcome.terminal == "timeout"
+    assert "总时长" in outcome.error_message
+    assert outcome.exit_code is None
+    assert fake.terminate_calls >= 1
+
+def test_popen_wait_timeout_escalates_terminate_then_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0 缺口：process.wait 超时须走 terminate→kill 升级并返回 timeout 终局。"""
+    import codex_mcp_cyber.process as process_mod
+
+    fake = _StubbornWaitProcess([], raises=2)
+    monkeypatch.setattr(process_mod.shutil, "which", lambda _n: "codex-fake")
+    monkeypatch.setattr(process_mod.subprocess, "Popen", lambda *a, **k: fake)  # noqa: ARG005
+    runner = PopenCodexRunner()
+    outcome = runner.run(["codex", "exec"], prompt="hi", timeout=30, max_duration=60)
+    assert outcome.terminal == "timeout"
+    assert "等待超时" in outcome.error_message
+    assert fake.terminate_calls == 1
+    assert fake.kill_calls == 1
+    assert outcome.exit_code is None
+
+def test_popen_cleanup_kill_upgrade_when_terminate_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P0 缺口：_cleanup 对无视 terminate 的顽固进程须升级 kill。"""
+    import codex_mcp_cyber.process as process_mod
+
+    fake = _IgnoresTerminateProcess([])
+    fake.stdout = _BlockingStdout()  # type: ignore[assignment]
+    monkeypatch.setattr(process_mod.shutil, "which", lambda _n: "codex-fake")
+    monkeypatch.setattr(process_mod.subprocess, "Popen", lambda *a, **k: fake)  # noqa: ARG005
+    runner = PopenCodexRunner(clock=_SteppingClock(0.0, 0.0, 31.0))
+    outcome = runner.run(["codex", "exec"], prompt="hi", timeout=30, max_duration=0)
+    assert outcome.terminal == "idle_timeout"
+    assert fake.terminate_calls >= 1
+    assert fake.kill_calls == 1
+
+def test_popen_spawn_uses_workdir_verbatim_as_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """seam 契约：workdir 是调用方交付的成品字符串，生产 adapter 原样用作
+    Popen cwd，不得再加工（此前 process 私自二次 format_cli_path，
+    测试 adapter 不复刻 —— seam 两侧约定不一致）。"""
+    import codex_mcp_cyber.process as process_mod
+
+    captured: dict = {}
+
+    def fake_popen(*a, **k):  # noqa: ANN002, ANN003
+        captured["cwd"] = k.get("cwd")
+        return _FakeProcess([])
+
+    monkeypatch.setattr(process_mod.shutil, "which", lambda _name: "codex-fake")
+    monkeypatch.setattr(process_mod.subprocess, "Popen", fake_popen)
+    _skip_grace_sleep(monkeypatch)
+    runner = PopenCodexRunner()
+    given = "C:/给定/成品路径"
+    runner.run(
+        ["codex", "exec"], prompt="hi", workdir=given, timeout=30, max_duration=60
+    )
+    assert captured["cwd"] == given
 
 def test_popen_default_stops_after_turn_completed(
     monkeypatch: pytest.MonkeyPatch,

@@ -24,7 +24,7 @@ class _RaiseNotFoundRunner:
         cmd: list[str],
         *,
         prompt: str,
-        workdir: Path | str | None = None,
+        workdir: str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
@@ -63,7 +63,7 @@ class _CountingNotFoundRunner:
         cmd: list[str],
         *,
         prompt: str,
-        workdir: Path | str | None = None,
+        workdir: str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
@@ -108,12 +108,16 @@ async def test_subtool_123_noise_does_not_mask_successful_review(
     lines = _ok_lines("✅ PASS")
     lines.insert(1, "rg: setup*: 文件名、目录名或卷标语法不正确。 (os error 123)")
     result = await run_review(
-        ReviewRequest(prompt="x", cd=tmp_path, max_retries=0),
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=0, return_metrics=True),
         runner=ScriptedLinesRunner(lines=lines, exit_code=0),
     )
     assert result.success is True
     assert result.session_id == "sess-1"
     assert result.text == "✅ PASS"
+    # 成功路径 metrics 的诊断字段实值兜底（漏穿散标量 → 静默取默认，套件须变红）
+    assert result.metrics is not None
+    assert result.metrics["json_decode_errors"] == 1
+    assert result.metrics["raw_output_lines"] == 5
     wire = to_wire(result)
     assert wire["success"] is True
     assert wire["SESSION_ID"] == "sess-1"
@@ -216,11 +220,37 @@ async def test_wire_exact_keys_on_ordinary_failure(tmp_path: Path) -> None:
     assert set(wire.keys()) == {
         "success",
         "tool",
+        "SESSION_ID",
         "error",
         "error_kind",
         "error_detail",
         "duration",
     }
+    # 未建会话的失败：键在、值为 None（键集恒定，读方无需按有无判断）
+    assert wire["SESSION_ID"] is None
+
+
+@pytest.mark.asyncio
+async def test_failure_wire_carries_session_id_when_established(
+    tmp_path: Path,
+) -> None:
+    """失败结局不再丢弃已取得的会话标识（0.6.0）：wire 失败分支带
+    SESSION_ID，复审可 resume 失败会话（0.5.1 实战：初审失败丢会话、
+    复审被迫重建 + 手工附摘要）。"""
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "sess-p"}),
+        json.dumps({"type": "error", "message": "upstream blew up"}),
+    ]
+    result = await run_review(
+        ReviewRequest(prompt="x", cd=tmp_path, max_retries=0),
+        runner=ScriptedLinesRunner(lines=lines, exit_code=1),
+    )
+    assert result.success is False
+    assert result.error_kind == ErrorKind.UPSTREAM_ERROR
+    assert result.session_id == "sess-p"
+    wire = to_wire(result)
+    assert wire["success"] is False
+    assert wire["SESSION_ID"] == "sess-p"
 
 @pytest.mark.asyncio
 async def test_wire_exact_keys_on_success(tmp_path: Path) -> None:
@@ -258,12 +288,14 @@ async def test_wire_exact_keys_on_command_not_found(tmp_path: Path) -> None:
     assert set(wire.keys()) == {
         "success",
         "tool",
+        "SESSION_ID",
         "error",
         "error_kind",
         "error_detail",
         "duration",
     }
     assert wire["error_kind"] == ErrorKind.COMMAND_NOT_FOUND
+    assert wire["SESSION_ID"] is None
     assert "duration" in wire
 
 @pytest.mark.asyncio
@@ -531,6 +563,8 @@ async def test_retryable_failure_then_success_records_metrics(
     assert result.metrics["exit_code"] == 0
     assert result.metrics["success"] is True
     assert result.metrics["result_chars"] == len("RECOVERED")
+    assert result.metrics["raw_output_lines"] == 4
+    assert result.metrics["json_decode_errors"] == 0
     assert result.metrics.get("ts_end") is not None
 
 @pytest.mark.asyncio
@@ -677,6 +711,7 @@ async def test_failure_metrics_keep_partial_result_chars(tmp_path: Path) -> None
 
     lines = [
         _json.dumps({"type": "thread.started", "thread_id": "sess-p"}),
+        "plain-noise-line",
         _json.dumps(
             {
                 "type": "item.completed",
@@ -699,6 +734,9 @@ async def test_failure_metrics_keep_partial_result_chars(tmp_path: Path) -> None
     assert result.metrics is not None
     assert result.metrics["result_chars"] == len("PARTIAL")
     assert result.metrics["result_lines"] == 1
+    # 失败路径 metrics 的诊断字段实值兜底（非默认值，漏穿即红）
+    assert result.metrics["raw_output_lines"] == 4
+    assert result.metrics["json_decode_errors"] == 1
     # ts_end 与 duration_ms 同一终止时刻
     from datetime import datetime
 

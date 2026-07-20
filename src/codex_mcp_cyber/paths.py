@@ -83,14 +83,6 @@ def _looks_like_unc(path_text: str) -> bool:
     return norm.startswith("\\\\")
 
 
-def path_has_non_ascii(path: Path | str) -> bool:
-    try:
-        str(path).encode("ascii")
-        return False
-    except UnicodeEncodeError:
-        return True
-
-
 def normalize_workdir(cd: Path | str) -> Path:
     """把 MCP / agent 传入的工作目录归一成干净 Path。
 

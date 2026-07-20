@@ -27,6 +27,19 @@ def redact_tool_result_event(event: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def tail_window(lines: list[str], max_lines: int = LAST_LINES_LIMIT) -> list[str]:
+    """诊断窗口的唯一算法：保尾 max_lines 行（返回新列表）。
+
+    ``max_lines <= 0`` 视为零窗口返回空列表 —— ``lines[-0:]`` 的「返回全量」
+    是 Python 切片陷阱，不是本窗口的契约。
+    归约期（stream）与错误详情装配期（filter_last_lines）都调它 ——
+    此前两处各写一遍同一语义，共享的只有常量。
+    """
+    if max_lines <= 0:
+        return []
+    return list(lines[-max_lines:])
+
+
 def filter_last_lines(
     lines: list[str], max_lines: int = LAST_LINES_LIMIT
 ) -> list[str]:
@@ -49,4 +62,4 @@ def filter_last_lines(
             filtered.append(line)
         except (json.JSONDecodeError, TypeError, AttributeError):
             filtered.append(line)
-    return filtered[-max_lines:]
+    return tail_window(filtered, max_lines)

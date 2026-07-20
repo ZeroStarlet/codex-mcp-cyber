@@ -157,7 +157,11 @@ def _finish(
 
 
 def to_wire(result: ReviewResult) -> Dict[str, Any]:
-    """ReviewResult → 冻结 MCP wire dict。"""
+    """ReviewResult → 冻结 MCP wire dict。
+
+    0.6.0：失败分支同样携带 SESSION_ID（未建会话为 None）——已建会话的
+    失败可直接复审 resume，不再被迫重建会话。
+    """
     duration = format_duration_ms(result.duration_ms)
     if result.success:
         out: Dict[str, Any] = {
@@ -171,6 +175,7 @@ def to_wire(result: ReviewResult) -> Dict[str, Any]:
         out = {
             "success": False,
             "tool": "codex",
+            "SESSION_ID": result.session_id,
             "error": display_error(
                 error_kind=result.error_kind,
                 error_message=result.error_message,
@@ -188,14 +193,19 @@ def to_wire(result: ReviewResult) -> Dict[str, Any]:
     return out
 
 
-def build_codex_argv(req: ReviewRequest, workdir: Path) -> list[str]:
+def build_codex_argv(
+    req: ReviewRequest, workdir: Path, *, cli_workdir: str
+) -> list[str]:
     """审核请求 → Codex CLI argv（编码侧协议的单一来源）。
 
     初审（会话标识为空）：不追加 resume。
     复审（会话标识非空）：``resume <会话标识>`` 缀在**所有** flag 之后。
-    路径一律裸串（list argv 不包引号；format_cli_path 保证 Windows 原生形态）；
-    ``--image`` 相对工作目录解析，不落到 MCP 服务 cwd。
-    argv[0] 是命令名 codex，可执行体绝对路径由生产 adapter 解析改写。
+    ``cli_workdir``：run_review 用 format_cli_path 对归一工作目录**一次**
+    计算的成品字符串 —— 同一字符串既进 ``--cd`` 也穿 runner seam 当 cwd，
+    两处不得各自格式化（同源不变量）。
+    路径一律裸串（list argv 不包引号）；``--image`` 相对工作目录（Path）
+    解析，不落到 MCP 服务 cwd。argv[0] 是命令名 codex，可执行体绝对路径
+    由生产 adapter 解析改写。
     """
     cmd = [
         "codex",
@@ -203,7 +213,7 @@ def build_codex_argv(req: ReviewRequest, workdir: Path) -> list[str]:
         "--sandbox",
         req.sandbox,
         "--cd",
-        format_cli_path(workdir),
+        cli_workdir,
         "--json",
     ]
     image_list = (
@@ -289,9 +299,11 @@ async def run_review(
             retries=0,
         )
 
-    cmd = build_codex_argv(req, workdir)
-    # 子进程 cwd 也设为工作目录，让 Codex 子工具的相对路径解析落在同一处。
-    # 经 run(...) 传入 —— 它是 seam 的一部分，不是某个具体 adapter 的字段。
+    # workdir → OS 字符串只格式化一次：同一 cli_workdir 进 argv --cd，
+    # 也经 run(...) 穿 runner seam 原样用作子进程 cwd（同源不变量；
+    # 此前生产 adapter 私自再格式化一次，seam 两侧约定不一致）。
+    cli_workdir = format_cli_path(workdir)
+    cmd = build_codex_argv(req, workdir, cli_workdir=cli_workdir)
     max_retries = max(0, req.max_retries)
     retries = 0
     last: StreamOutcome | None = None
@@ -301,7 +313,7 @@ async def run_review(
             proc = active_runner.run(
                 cmd,
                 prompt=req.prompt,
-                workdir=workdir,
+                workdir=cli_workdir,
                 timeout=req.timeout,
                 max_duration=req.max_duration,
             )
@@ -388,7 +400,9 @@ async def run_review(
         ts_start,
         ReviewResult(
             success=False,
-            # 失败终局 text 保持空串（行为冻结）；partial 仅经 result_text 进 metrics
+            # 失败终局 text 保持空串（行为冻结）；partial 仅经 result_text 进 metrics。
+            # 已取得的会话标识不丢弃（0.6.0）：复审可 resume 失败会话。
+            session_id=last.session_id,
             error_kind=last.error_kind,
             error_message=last.error_message,
             error_detail=detail,

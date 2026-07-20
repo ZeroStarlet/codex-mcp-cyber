@@ -12,7 +12,6 @@ from codex_mcp_cyber.paths import (
     InvalidWorkdirError,
     format_cli_path,
     normalize_workdir,
-    path_has_non_ascii,
 )
 from codex_mcp_cyber.process import PopenCodexRunner
 from codex_mcp_cyber.review import ReviewRequest, build_codex_argv, run_review
@@ -142,7 +141,6 @@ def test_normalize_non_ascii_workdir_passes_through(tmp_path: Path) -> None:
     chinese.mkdir()
     got = normalize_workdir(str(chinese))
     assert got == Path(os.path.abspath(str(chinese)))
-    assert path_has_non_ascii(got) is True
     cli = format_cli_path(got)
     assert "审查项目" in cli
     assert '"' not in cli
@@ -160,11 +158,6 @@ def test_format_cli_path_relative_uses_base(tmp_path: Path) -> None:
     assert s == os.path.normpath(str(tmp_path / "shot.png"))
 
 
-def test_path_has_non_ascii_detects_chinese() -> None:
-    assert path_has_non_ascii("C:/Users/you/审查/repo") is True
-    assert path_has_non_ascii("C:/Users/you/repo") is False
-
-
 def test_looks_like_invalid_path_markers() -> None:
     assert looks_like_invalid_path_error(
         "Error: 文件名、目录名或卷标语法不正确。 (os error 123)"
@@ -180,7 +173,7 @@ def test_looks_like_invalid_path_markers() -> None:
 @pytest.mark.skipif(os.name != "nt", reason="Windows path formatting")
 def test_build_codex_argv_uses_formatted_path_without_quotes(tmp_path: Path) -> None:
     req = ReviewRequest(prompt="x", cd=tmp_path)
-    cmd = build_codex_argv(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path, cli_workdir=format_cli_path(tmp_path))
     assert "--cd" in cmd
     cd_arg = cmd[cmd.index("--cd") + 1]
     assert '"' not in cd_arg
@@ -189,7 +182,7 @@ def test_build_codex_argv_uses_formatted_path_without_quotes(tmp_path: Path) -> 
 
 def test_build_codex_argv_image_relative_to_workdir(tmp_path: Path) -> None:
     req = ReviewRequest(prompt="x", cd=tmp_path, image=[Path("shot.png")])
-    cmd = build_codex_argv(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path, cli_workdir=format_cli_path(tmp_path))
     assert "--image" in cmd
     img = cmd[cmd.index("--image") + 1]
     assert img == os.path.normpath(str(tmp_path / "shot.png"))
@@ -204,7 +197,7 @@ def test_build_codex_argv_image_relative_to_workdir(tmp_path: Path) -> None:
 def test_build_codex_argv_initial_review_has_no_resume(tmp_path: Path) -> None:
     """初审：session_id 为空 → argv 不得出现 resume。"""
     req = ReviewRequest(prompt="x", cd=tmp_path, session_id="")
-    cmd = build_codex_argv(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path, cli_workdir=format_cli_path(tmp_path))
     assert "resume" not in cmd
 
 
@@ -219,7 +212,7 @@ def test_build_codex_argv_re_review_appends_resume_after_all_flags(tmp_path: Pat
         profile="prof",
         yolo=True,
     )
-    cmd = build_codex_argv(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path, cli_workdir=format_cli_path(tmp_path))
 
     assert cmd[:2] == ["codex", "exec"]
     # resume 与 id 相邻且收尾
@@ -234,7 +227,7 @@ def test_build_codex_argv_re_review_appends_resume_after_all_flags(tmp_path: Pat
 def test_build_codex_argv_re_review_keeps_sandbox_and_cd(tmp_path: Path) -> None:
     """复审不得丢掉沙箱策略与工作目录 —— 只读边界在复审同样生效。"""
     req = ReviewRequest(prompt="x", cd=tmp_path, session_id="abc-123")
-    cmd = build_codex_argv(req, tmp_path)
+    cmd = build_codex_argv(req, tmp_path, cli_workdir=format_cli_path(tmp_path))
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
     assert cmd[cmd.index("--cd") + 1] == format_cli_path(tmp_path)
 
@@ -273,11 +266,11 @@ async def test_workdir_is_stable_across_retries(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_non_ascii_workdir_reaches_seam_unaliased(tmp_path: Path) -> None:
-    """中文工作目录必须**原样**穿过 runner seam —— 与归一结果精确相等。
+    """中文工作目录必须**原样**穿过 runner seam —— 与归一结果精确对应。
 
     宽断言（basename / 包含判断）会放过「换一个同名别名」类改写；
-    这里要求 seam 收到的 workdir、argv --cd、领域结局三处与
-    normalize_workdir 的输出逐一全等。
+    这里要求：seam 收到的 workdir == argv --cd（同源不变量，逐字同串），
+    两者 == format_cli_path(归一结果)；领域结局 workdir == 归一 Path。
     """
     chinese = tmp_path / "审查项目"
     chinese.mkdir()
@@ -288,11 +281,12 @@ async def test_non_ascii_workdir_reaches_seam_unaliased(tmp_path: Path) -> None:
         runner=runner,
     )
     assert result.success is True
-    assert runner.seen_workdirs[0] == expected
+    assert runner.seen_workdirs[0] == format_cli_path(expected)
     assert result.workdir == expected
     cd_arg = runner.seen_cmds[0][runner.seen_cmds[0].index("--cd") + 1]
     assert cd_arg == format_cli_path(expected)
-    assert path_has_non_ascii(cd_arg) is True
+    assert runner.seen_workdirs[0] == cd_arg
+    assert "审查项目" in cd_arg
     assert '"' not in cd_arg
 
 

@@ -39,4 +39,5 @@
 | 其他（`timeout` / `upstream_error` 等） | 工具默认重试 1 次 |
 | 仍然失败 | 将 diff 与审查意图写入 `docs/pending-review-<date>.md`，待恢复后补审 |
 
+失败返回中的 `SESSION_ID` 非空时，恢复后的补审 / 复审直接复用该会话。
 工具层重试（单次调用）与流程层 3 轮闸互不冲突。

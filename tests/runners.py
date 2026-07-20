@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 from codex_mcp_cyber.stream import ProcessOutcome, Terminal
@@ -17,8 +16,8 @@ from codex_mcp_cyber.stream import ProcessOutcome, Terminal
 class ScriptedLinesRunner:
     """测试 adapter：回放固定行序列，不碰 OS。
 
-    记录每次调用收到的 workdir 与 cmd，供「workdir / argv 确实穿过 seam」
-    类断言使用。
+    记录每次调用收到的 workdir（seam 成品字符串）与 cmd，供
+    「workdir / argv 确实穿过 seam 且同源」类断言使用。
     """
 
     lines: list[str]
@@ -26,7 +25,7 @@ class ScriptedLinesRunner:
     terminal: Terminal = "completed"
     error_message: str = ""
     calls: int = 0
-    seen_workdirs: list[Path | str | None] = field(default_factory=list)
+    seen_workdirs: list[str | None] = field(default_factory=list)
     seen_cmds: list[list[str]] = field(default_factory=list)
 
     def run(
@@ -34,7 +33,7 @@ class ScriptedLinesRunner:
         cmd: list[str],
         *,
         prompt: str,
-        workdir: Path | str | None = None,
+        workdir: str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:
@@ -59,7 +58,7 @@ class SequenceRunner:
 
     steps: list[ProcessOutcome]
     calls: int = 0
-    seen_workdirs: list[Path | str | None] = field(default_factory=list)
+    seen_workdirs: list[str | None] = field(default_factory=list)
     seen_cmds: list[list[str]] = field(default_factory=list)
 
     def run(
@@ -67,7 +66,7 @@ class SequenceRunner:
         cmd: list[str],
         *,
         prompt: str,
-        workdir: Path | str | None = None,
+        workdir: str | None = None,
         timeout: int,
         max_duration: int,
     ) -> ProcessOutcome:

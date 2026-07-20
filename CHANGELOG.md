@@ -1,5 +1,49 @@
 # 变更记录
 
+## 0.6.0
+
+### 契约：失败结局携带会话标识（wire 新增键）
+
+**结论先行**：失败 wire 现在恒含 `SESSION_ID`（未建会话为 null）。
+0.5.1 实战教训：初审失败丢会话 → 复审被迫 `""` 重建并手工附摘要。
+已建会话的失败（如 upstream_error）如今返回其会话标识，复审直接
+resume；技能文档「会话丢失」降为 null 时的边缘预案。成功 wire 不变；
+失败键集 6 → 7（test_review_run 键集钉与 codex-guide 示例同步）。
+
+### 架构深化（2026-07-21 走查四项；interface 均不破坏 wire）
+
+- **行流证据通道类型化**：错误文本统一经 `_note_error_text` 进展示通道并
+  即时抽取 123 分类证据（`saw_invalid_path_text`）；finalize 只读字段，
+  不再对自己拼的 error_message 正则回扫——0.5.1 事故的机制性根除。
+  新增行为钉：fail 事件携 123 且无会话 → invalid_path。
+- **workdir→cwd 单一来源**：`run_review` 用 format_cli_path 一次算出
+  `cli_workdir`，同一字符串既进 argv `--cd` 也穿 runner seam；生产
+  adapter 原样用作 Popen cwd（不再私自二次格式化）。`CodexProcessRunner`
+  interface 升为成品字符串契约，并补写超时 / 异常模式（此前只在实现里
+  可见）。新增钉：seam 收到的 workdir 与 `--cd` 逐字同串；Popen cwd 与
+  传入 workdir 逐字相等。`build_codex_argv` 增必填 `cli_workdir`
+  （仓库内 API）。
+- **诊断窗口单一算法**：`redact.tail_window` 成为保尾 50 行的唯一实现，
+  stream 折叠期与 filter_last_lines 均调用之（此前两套机制只共享常量）。
+- **删除 `path_has_non_ascii`**：零生产调用的残留探针（绑定 0.5.0 已移除
+  机制）连同其断言删除；repro 脚本改内联判断。
+- **Codex 初审采纳（⚠ 两项）**：`tail_window` 非正窗口按零窗口返回空列表
+  （`[-0:]` 切片陷阱防护）并补边界钉（>50 行保尾、畸形 break 排尾、
+  非正窗口）；`CodexProcessRunner` 文档补 0.6.0 第三方 adapter 迁移影响，
+  测试 runner 注解同步收窄为 `str | None`。
+- **runner 深生命周期可测化**（第二轮走查 Top 1）：`PopenCodexRunner`
+  增内部时钟 seam（``clock`` 注入，默认真实时钟；生产行为零改动），
+  配可抛 TimeoutExpired / 无视 terminate 的测试进程——墙钟超时、空闲
+  超时、``wait`` 超时 terminate→kill 升级、``_cleanup`` kill 升级四簇
+  「出错即杀进程」分支首次有回归网。另补 metrics 层
+  ``raw_output_lines`` / ``json_decode_errors`` 实值断言（第二轮走查
+  Top 2：关掉散标量漏传的静默错数据窗口）。
+
+### 版本口径
+
+Python 包 0.5.1 → 0.6.0（wire 失败分支新增键 + 仓库内 API 变更）；
+`plugin.json` 0.2.3 → 0.2.4（技能文档随 SESSION_ID 语义更新）。
+
 ## 0.5.1
 
 ### 修复：子工具 123 噪音不再盖掉成功审查

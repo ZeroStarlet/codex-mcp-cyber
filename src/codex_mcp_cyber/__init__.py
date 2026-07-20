@@ -1,3 +1,3 @@
 """codex-mcp-cyber: Claude + Codex 代码审查 MCP 服务器"""
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"

@@ -114,6 +114,27 @@ def test_reduce_non_string_thread_id_is_unexpected() -> None:
     assert stream.error_kind == ErrorKind.UNEXPECTED_EXCEPTION
     assert stream.session_id is None
 
+def test_reduce_failed_event_123_without_session_condemns_invalid_path() -> None:
+    """fail 事件文本携 123 且**无会话** → invalid_path 盖过 upstream_error。
+
+    行为钉：123 证据不止来自 JSON 解码失败行，也来自 fail/error 事件消息；
+    无会话时同样定罪（不可重试），与解码失败行同一规则。
+    """
+    lines = [
+        json.dumps(
+            {
+                "type": "turn.failed",
+                "error": {
+                    "message": "boot: 文件名、目录名或卷标语法不正确。 (os error 123)"
+                },
+            }
+        ),
+    ]
+    stream = reduce_codex_stream(_po(lines, exit_code=1))
+    assert stream.had_error is True
+    assert stream.error_kind == ErrorKind.INVALID_PATH
+    assert stream.session_id is None
+
 def test_reduce_session_plus_failed_123_is_retryable_upstream() -> None:
     """已建会话 + turn.failed 携 123 文本 → upstream_error（可重试），非 invalid_path。
 
@@ -186,6 +207,34 @@ def test_reduce_timeout_still_collects_diagnostics() -> None:
     assert stream.last_lines == lines
     blob = json.dumps(stream.all_messages, ensure_ascii=False)
     assert secret not in blob
+
+def test_tail_window_non_positive_means_empty() -> None:
+    """窗口 <= 0 返回空列表：lines[-0:] 的「全量」是切片陷阱，不是契约。"""
+    from codex_mcp_cyber.redact import tail_window
+
+    assert tail_window(["a", "b"], 0) == []
+    assert tail_window(["a", "b"], -5) == []
+    assert tail_window(["a", "b"], 1) == ["b"]
+
+def test_reduce_last_lines_keeps_tail_window_over_50() -> None:
+    """>50 行时 last_lines 恰为最后 50 行（窗口重构的等价性关键边界）。"""
+    lines = [f"noise-{i}" for i in range(75)]
+    stream = reduce_codex_stream(_po(lines, exit_code=1))
+    assert len(stream.last_lines) == 50
+    assert stream.last_lines[0] == "noise-25"
+    assert stream.last_lines[-1] == "noise-74"
+
+def test_reduce_malformed_break_window_excludes_unprocessed_tail() -> None:
+    """畸形 break：触发行入窗，其后未处理行不入窗（旧增量窗口语义）。"""
+    lines = [
+        json.dumps({"type": "thread.started", "thread_id": "t1"}),
+        "[]",
+        "after-should-not-enter-window",
+    ]
+    stream = reduce_codex_stream(_po(lines, exit_code=1))
+    assert stream.error_kind == ErrorKind.UNEXPECTED_EXCEPTION
+    assert stream.last_lines[-1] == "[]"
+    assert "after-should-not-enter-window" not in stream.last_lines
 
 def test_redact_tool_result_event_truncates_only_tool_result() -> None:
     fat = _fat_tool_result_event()
