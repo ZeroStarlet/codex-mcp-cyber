@@ -11,7 +11,10 @@ from codex_mcp_cyber.tools.codex import codex_tool
 
 mcp = FastMCP("codex-mcp-cyber")
 
-# 唯一 wire 壳 = codex_tool；server 只注册（ADR-0004）
+# 唯一 wire 壳 = codex_tool；server 只注册，不重复声明参数。
+# 理由：15 个参数的 wire 契约若在 server 与 tools/codex 各写一份，
+# 两份签名会各自漂移（默认值、Literal 取值、Annotated 描述），
+# 而 MCP 客户端只看得到 server 注册的那份 —— 分歧只会在运行时暴露。
 mcp.tool(
     name="codex",
     description=(

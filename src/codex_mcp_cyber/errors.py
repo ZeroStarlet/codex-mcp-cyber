@@ -42,7 +42,6 @@ class ErrorKind:
     UPSTREAM_ERROR = "upstream_error"
     AUTH_REQUIRED = "auth_required"
     INVALID_PATH = "invalid_path"
-    JSON_DECODE = "json_decode"
     PROTOCOL_MISSING_SESSION = "protocol_missing_session"
     EMPTY_RESULT = "empty_result"
     SUBPROCESS_ERROR = "subprocess_error"
@@ -146,10 +145,7 @@ def normalize_workdir(cd: Path | str) -> Path:
     严格策略：空串 / 内嵌 NUL / 不可解析 URI → InvalidWorkdirError。
     先剥成对包裹引号，再解析 file URI；不做路径内部有损替换。
     """
-    if isinstance(cd, Path):
-        text = str(cd)
-    else:
-        text = str(cd)
+    text = str(cd)
 
     if "\x00" in text:
         raise InvalidWorkdirError("工作目录含 NUL 字节")
@@ -363,19 +359,6 @@ def _current_user_sid() -> str | None:
         kernel.CloseHandle(token)
 
 
-def _system32_icacls() -> str | None:
-    """可信的 icacls 绝对路径；不在 PATH / cwd 搜索，不信可写的 SystemRoot 环境变量。"""
-    windir = _windows_directory()
-    if not windir:
-        return None
-    icacls = os.path.normpath(os.path.join(windir, "System32", "icacls.exe"))
-    if not os.path.isabs(icacls):
-        return None
-    if not os.path.isfile(icacls):
-        return None
-    return icacls
-
-
 def _windows_directory() -> str | None:
     """真实 Windows 目录：仅 WinAPI。失败返回 None（不 fail-open 到 C:\\Windows）。"""
     if os.name != "nt":
@@ -456,29 +439,6 @@ def _path_owner_sid(path: Path) -> str | None:
     finally:
         if pSD:
             kernel.LocalFree(pSD)
-
-
-def _run_icacls(args: list[str]) -> bool:
-    try:
-        import subprocess
-
-        completed = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            shell=False,
-        )
-        return completed.returncode == 0
-    except OSError:
-        return False
-
-
-def _restrict_shared_base_acl(path: Path) -> bool:
-    """兼容旧名：共享 base 已废弃，转私有策略。"""
-    return _restrict_private_dir_acl(path)
 
 
 def _restrict_private_dir_acl(path: Path) -> bool:
@@ -564,11 +524,6 @@ def _restrict_private_dir_acl(path: Path) -> bool:
 
     owner2 = _path_owner_sid(path)
     return owner2 is not None and owner2.upper() == sid.upper()
-
-
-def _restrict_dir_acl_current_user(path: Path) -> bool:
-    """兼容旧名：按私有目录策略收敛。"""
-    return _restrict_private_dir_acl(path)
 
 
 def _junction_points_to(link: Path, target: Path) -> bool:
@@ -765,7 +720,11 @@ def _create_windows_junction(link: Path, target: Path) -> None:
 
     link = Path(link)
     target = Path(target)
-    link.parent.mkdir(parents=True, exist_ok=True)
+    # 父目录必须由 _ensure_private_user_tree 建好并验过（owner + protected DACL）。
+    # 此处**不**用 mkdir(parents=True) 顺手创建 —— 那会绕开整套私有目录策略，
+    # 拿到一个继承父级 ACL、未验 owner 的缓存根。缺失即 fail-closed。
+    if not link.parent.is_dir():
+        raise OSError(f"联接缓存父目录不存在或未经校验：{link.parent}")
 
     # lexists：dangling reparse 也要处理
     if os.path.lexists(link):
@@ -799,7 +758,9 @@ def _create_windows_junction(link: Path, target: Path) -> None:
         except OSError as e:
             raise OSError(f"无法替换已有路径别名 {link}: {e}") from e
 
-    link.mkdir(parents=False, exist_ok=False)
+    # 与缓存树同一套策略：owner=当前 SID + protected DACL，原子创建。
+    # 这个目录正是最终交给 Codex 的路径，不能比缓存根更宽松。
+    _create_private_dir_atomic(link)
 
     target_abs = os.path.abspath(str(target))
     if target_abs.startswith("\\\\"):
@@ -959,8 +920,7 @@ def is_auth_error(text: str) -> bool:
     return any(keyword in text_lower for keyword in auth_keywords)
 
 
-def is_retryable_error(error_kind: Optional[str], err_message: str = "") -> bool:
-    del err_message  # 预留；当前仅按 kind 判断
+def is_retryable_error(error_kind: Optional[str]) -> bool:
     if error_kind == ErrorKind.COMMAND_NOT_FOUND:
         return False
     if error_kind == ErrorKind.AUTH_REQUIRED:
@@ -982,7 +942,12 @@ def redact_tool_result_event(event: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
-def filter_last_lines(lines: list[str], max_lines: int = 50) -> list[str]:
+# last_lines 诊断窗口上限。归约期（stream）与错误详情装配期（build_error_detail）
+# 共用同一策略 —— 三处字面值曾各写一遍，改一处不会让另两处变红。
+LAST_LINES_LIMIT = 50
+
+
+def filter_last_lines(lines: list[str], max_lines: int = LAST_LINES_LIMIT) -> list[str]:
     """过滤 last_lines，脱敏 tool_result 中的大内容。"""
     filtered: list[str] = []
     for line in lines:
@@ -1015,7 +980,7 @@ def build_error_detail(
     if exit_code is not None:
         detail["exit_code"] = exit_code
     if last_lines:
-        detail["last_lines"] = filter_last_lines(last_lines, max_lines=50)
+        detail["last_lines"] = filter_last_lines(last_lines, max_lines=LAST_LINES_LIMIT)
     if json_decode_errors > 0:
         detail["json_decode_errors"] = json_decode_errors
     if idle_timeout_s is not None:

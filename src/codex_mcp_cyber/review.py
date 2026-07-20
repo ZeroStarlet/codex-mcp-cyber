@@ -284,7 +284,11 @@ def _run_attempt(
         max_duration=max_duration,
     )
 
-    # 单通道超时：只 reduce，不 finalize（ADR-0003）
+    # 单通道超时：只 reduce，不 finalize。
+    # 理由：finalize 会按「无 session_id / 无正文 / 退出码非零」补判错误种类，
+    # 而超时终局本就没有 session_id 与正文 —— 跑 finalize 会把 timeout
+    # 覆写成 protocol_missing_session 或 empty_result，丢掉真正的失败原因。
+    # 超时的种类已由 outcome.terminal 决定，不需要也不允许再补判。
     if outcome.terminal in ("timeout", "idle_timeout"):
         partial = list(outcome.lines)
         if partial:

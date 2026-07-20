@@ -84,8 +84,9 @@ def test_normalize_preserves_internal_backslash_quote() -> None:
     p = normalize_workdir(r"C:\folder\'repo")
     s = str(p)
     assert "folder" in s
-    # 内部引号应仍在（Windows 上可能保留为 '）
-    assert "'" in s or "\\'" in s or s.endswith("repo")
+    # 内部引号必须原样保留 —— 只剥成对包裹引号，不碰路径内部
+    assert "'" in s
+    assert s.endswith("'repo")
 
 
 @pytest.mark.asyncio
@@ -205,6 +206,50 @@ def test_build_cmd_image_relative_to_codex_cd(tmp_path: Path) -> None:
     assert img == os.path.normpath(str(tmp_path / "shot.png"))
 
 
+# ── 复审（re-review）argv 形状 ────────────────────────────────────────────
+# CONTEXT.md 把复审定为一等领域词，但此前整条路径零测试。
+# codex CLI 契约：`codex exec [OPTIONS] <COMMAND> [ARGS]`，
+# 即 resume 子命令必须排在所有 flag **之后**。
+
+
+def test_build_cmd_initial_review_has_no_resume(tmp_path: Path) -> None:
+    """初审：session_id 为空 → argv 不得出现 resume。"""
+    req = ReviewRequest(prompt="x", cd=tmp_path, session_id="")
+    cmd = _build_cmd(req, tmp_path)
+    assert "resume" not in cmd
+
+
+def test_build_cmd_re_review_appends_resume_after_all_flags(tmp_path: Path) -> None:
+    """复审：resume <id> 必须是 argv 末尾，且排在每一个 flag 之后。"""
+    sid = "01234567-89ab-cdef-0123-456789abcdef"
+    req = ReviewRequest(
+        prompt="x",
+        cd=tmp_path,
+        session_id=sid,
+        model="gpt-5",
+        profile="prof",
+        yolo=True,
+    )
+    cmd = _build_cmd(req, tmp_path)
+
+    assert cmd[:2] == ["codex", "exec"]
+    # resume 与 id 相邻且收尾
+    assert cmd[-2:] == ["resume", sid]
+    # 每个 flag 都在 resume 之前 —— CLI 要求 OPTIONS 先于 COMMAND
+    resume_at = cmd.index("resume")
+    for i, token in enumerate(cmd):
+        if token.startswith("--"):
+            assert i < resume_at, f"flag {token!r} 排在 resume 之后，CLI 会拒绝"
+
+
+def test_build_cmd_re_review_keeps_sandbox_and_cd(tmp_path: Path) -> None:
+    """复审不得丢掉沙箱策略与工作目录 —— 只读边界在复审同样生效。"""
+    req = ReviewRequest(prompt="x", cd=tmp_path, session_id="abc-123")
+    cmd = _build_cmd(req, tmp_path)
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+    assert cmd[cmd.index("--cd") + 1] == format_cli_path(tmp_path)
+
+
 @pytest.mark.asyncio
 async def test_run_review_sets_popen_workdir_on_real_runner(
     tmp_path: Path,
@@ -277,16 +322,24 @@ async def test_file_as_workdir_is_invalid(tmp_path: Path) -> None:
     assert result.error_kind == "invalid_path"
 
 
-def test_path_chain_has_reparse_without_exists_guard(
+def test_path_chain_has_reparse_walks_up_to_ancestor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """dangling reparse：不得因 exists()=False 而漏检。"""
+    """reparse 在祖先上时子路径也不可信；且不得因 exists()=False 漏检。
+
+    只在祖先上打标，叶子与中间层都不是 reparse —— 断言真的走了整条链，
+    而不是仅仅证明「A 调用了 B」。
+    """
     from codex_mcp_cyber import errors as err
 
-    link = tmp_path / "dangling"
-    # 无特权时 symlink 可能失败；用 monkeypatch 模拟
-    monkeypatch.setattr(err, "_is_reparse_point", lambda p: p == link)
-    assert err._path_chain_has_reparse(link) is True
+    ancestor = tmp_path / "reparse-ancestor"
+    # 叶子与中间层都不存在：走链必须靠 lstat 而非 exists()
+    leaf = ancestor / "mid" / "leaf"
+    monkeypatch.setattr(err, "_is_reparse_point", lambda p: p == ancestor)
+
+    assert err._path_chain_has_reparse(leaf) is True
+    # 负例：同级另一棵树上无 reparse，必须为 False（否则上面的 True 无意义）
+    assert err._path_chain_has_reparse(tmp_path / "clean" / "leaf") is False
 
 
 def test_missing_path_is_not_reparse() -> None:
@@ -370,11 +423,20 @@ async def test_popen_oserror_267_is_invalid_path(tmp_path: Path) -> None:
     assert result.error_kind == "invalid_path"
 
 
+def _icacls_exe() -> str | None:
+    """测试自用：定位 System32\\icacls.exe。
+
+    不依赖生产符号 —— 生产侧 ACL 走 WinAPI，不再 shell out 到 icacls。
+    """
+    windir = os.environ.get("SystemRoot") or r"C:\Windows"
+    exe = os.path.normpath(os.path.join(windir, "System32", "icacls.exe"))
+    return exe if os.path.isfile(exe) else None
+
+
 def _icacls_dump(path: Path) -> str:
-    from codex_mcp_cyber import errors as err
     import subprocess
 
-    exe = err._system32_icacls()
+    exe = _icacls_exe()
     assert exe is not None
     r = subprocess.run(
         [exe, str(path)],
@@ -418,10 +480,9 @@ def _assert_private_acl_shape(out: str) -> None:
 
 
 def _grant_everyone_full(path: Path) -> None:
-    from codex_mcp_cyber import errors as err
     import subprocess
 
-    exe = err._system32_icacls()
+    exe = _icacls_exe()
     assert exe is not None
     r = subprocess.run(
         [exe, str(path), "/grant", "Everyone:(OI)(CI)F"],
@@ -508,28 +569,7 @@ def test_restrict_acl_rejects_foreign_owner(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(err, "_current_user_sid", lambda: "S-1-5-21-me")
     monkeypatch.setattr(err, "_path_owner_sid", lambda p: "S-1-5-21-attacker")
     monkeypatch.setattr(err.os.path, "lexists", lambda p: True)
-    monkeypatch.setattr(
-        err,
-        "_system32_icacls",
-        lambda: r"C:\Windows\System32\icacls.exe",
-    )
     assert err._restrict_private_dir_acl(Path("C:/preowned")) is False
-
-
-@pytest.mark.skipif(os.name != "nt", reason="icacls is Windows-only")
-def test_shared_base_acl_does_not_require_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 共享策略已废弃；保留名用于兼容，行为等同 private（需 owner）
-    from codex_mcp_cyber import errors as err
-
-    monkeypatch.setattr(err, "_current_user_sid", lambda: "S-1-5-21-me")
-    monkeypatch.setattr(err, "_path_owner_sid", lambda p: "S-1-5-21-other")
-    monkeypatch.setattr(err.os.path, "lexists", lambda p: True)
-    monkeypatch.setattr(
-        err,
-        "_system32_icacls",
-        lambda: r"C:\Windows\System32\icacls.exe",
-    )
-    assert err._restrict_shared_base_acl(Path("C:/x")) is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")

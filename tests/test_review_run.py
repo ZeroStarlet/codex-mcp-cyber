@@ -194,7 +194,11 @@ async def test_wire_exact_keys_on_success(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_wire_exact_keys_on_command_not_found(tmp_path: Path) -> None:
-    """command_not_found 与其它失败路径统一含 duration（ADR-0002 规范化）。"""
+    """command_not_found 与其它失败路径统一含 duration。
+
+    冻结行为：wire dict 的 duration 键在成功/失败两条路径上都必须存在，
+    调用方无需按 success 分支决定能否读它。
+    """
     outcome = await run_review(
         ReviewRequest(prompt="x", cd=tmp_path, max_retries=0),
         runner=_RaiseNotFoundRunner(),  # type: ignore[arg-type]
@@ -312,7 +316,11 @@ async def test_codex_tool_shell_returns_wire_dict_not_review_result(
     assert "SESSION_ID" in wire
 
 def test_server_registers_codex_tool_as_mcp_handler() -> None:
-    """server 只注册 tools.codex_tool，无第二份 15 参壳（ADR-0004）。"""
+    """server 只注册 tools.codex_tool，无第二份 15 参壳。
+
+    冻结行为：wire 契约单一来源。两份签名会各自漂移，而客户端只看得到
+    server 注册的那份 —— 分歧只在运行时暴露。
+    """
     from codex_mcp_cyber.server import mcp
     from codex_mcp_cyber.tools.codex import codex_tool as shell
 

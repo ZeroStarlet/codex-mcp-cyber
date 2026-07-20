@@ -45,6 +45,25 @@ class _FakeProcess:
     def kill(self) -> None:
         self._alive = False
 
+def _skip_grace_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 early-stop grace 睡眠压到 0，其余 sleep 保持真实。
+
+    阈值从 ``PopenCodexRunner.GRACEFUL_SHUTDOWN_DELAY`` 读取，不写字面值 ——
+    否则改动该常数时测试只会静默变慢，而不会变红。
+    """
+    import codex_mcp_cyber.process as process_mod
+
+    real_sleep = process_mod.time.sleep
+    grace = PopenCodexRunner.GRACEFUL_SHUTDOWN_DELAY
+
+    def _fast_sleep(sec: float) -> None:
+        if sec == grace:
+            return
+        real_sleep(sec)
+
+    monkeypatch.setattr(process_mod.time, "sleep", _fast_sleep)
+
+
 def _run_popen_with_fake_lines(
     lines: list[str],
     *,
@@ -60,15 +79,7 @@ def _run_popen_with_fake_lines(
         "Popen",
         lambda *a, **k: _FakeProcess(lines),  # noqa: ARG005
     )
-    # early-stop grace 在测试中压到 0，避免 0.3s 睡眠拖慢
-    real_sleep = process_mod.time.sleep
-
-    def _fast_sleep(sec: float) -> None:
-        if sec == 0.3:
-            return
-        real_sleep(sec)
-
-    monkeypatch.setattr(process_mod.time, "sleep", _fast_sleep)
+    _skip_grace_sleep(monkeypatch)
     runner = PopenCodexRunner(is_terminal_line=is_terminal_line)
     outcome = runner.run(
         ["codex", "exec"],
@@ -202,14 +213,7 @@ def test_popen_predicate_timeout_keeps_partial_lines(
         "Popen",
         lambda *a, **k: _FakeProcess(["before", "boom"]),  # noqa: ARG005
     )
-    real_sleep = process_mod.time.sleep
-
-    def _fast_sleep(sec: float) -> None:
-        if sec == 0.3:
-            return
-        real_sleep(sec)
-
-    monkeypatch.setattr(process_mod.time, "sleep", _fast_sleep)
+    _skip_grace_sleep(monkeypatch)
 
     def boom_timeout(line: str) -> bool:
         if line == "boom":
@@ -258,14 +262,7 @@ def test_popen_predicate_error_still_joins_via_outer_cleanup(
         lambda *a, **k: fake,  # noqa: ARG005
     )
     monkeypatch.setattr(process_mod.threading, "Thread", _RecordingThread)
-    real_sleep = process_mod.time.sleep
-
-    def _fast_sleep(sec: float) -> None:
-        if sec == 0.3:
-            return
-        real_sleep(sec)
-
-    monkeypatch.setattr(process_mod.time, "sleep", _fast_sleep)
+    _skip_grace_sleep(monkeypatch)
 
     def boom(line: str) -> bool:
         if line == "plain-log":

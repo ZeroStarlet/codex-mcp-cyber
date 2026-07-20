@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from codex_mcp_cyber.errors import (
+    LAST_LINES_LIMIT,
     ErrorKind,
     is_auth_error,
     looks_like_invalid_path_error,
@@ -157,7 +158,7 @@ def reduce_codex_stream(
     out = StreamOutcome()
     for line in lines:
         out.last_lines.append(line)
-        if len(out.last_lines) > 50:
+        if len(out.last_lines) > LAST_LINES_LIMIT:
             out.last_lines.pop(0)
 
         decoded = _decode_line(line)
