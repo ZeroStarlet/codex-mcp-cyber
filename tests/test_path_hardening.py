@@ -203,6 +203,48 @@ def test_prefer_codex_workdir_ascii_junction_for_non_ascii(
     assert again == preferred
 
 
+@pytest.mark.skipif(os.name != "nt", reason="junction is Windows-only")
+def test_junction_link_dir_goes_through_private_dir_policy(tmp_path: Path) -> None:
+    """交给 Codex 的联接目录必须走 create_private_dir_atomic，不得裸 mkdir。
+
+    回归背景：_create_windows_junction 曾用 link.mkdir() 创建这个目录，
+    绕开 owner + protected DACL —— 而它正是最终暴露给 Codex 的那个路径，
+    不能比缓存根更宽松。若该行退回裸 mkdir，本测试必须变红。
+    """
+    from codex_mcp_cyber.winsec import WinApiSecurity
+
+    class _TracingSec(WinApiSecurity):
+        """真实 WinAPI adapter，额外记录私有目录创建调用。"""
+
+        def __init__(self) -> None:
+            self.create_attempts: list[str] = []
+
+        def create_private_dir_atomic(self, path: Path) -> None:
+            self.create_attempts.append(os.path.normcase(str(path)))
+            super().create_private_dir_atomic(path)
+
+    cache = tmp_path / "ascii-cache"
+    chinese = tmp_path / "审查项目"
+    chinese.mkdir()
+    (chinese / "m.txt").write_text("ok", encoding="utf-8")
+
+    sec = _TracingSec()
+    preferred = prefer_codex_workdir(chinese, sec=sec, cache_base=cache)
+    assert preferred.resolve() != chinese.resolve() or preferred != chinese, (
+        "未建成 ASCII 联接，本测试失去意义"
+    )
+    assert path_has_non_ascii(preferred) is False
+
+    # 1) 联接目录本身确实经过私有目录策略创建
+    assert os.path.normcase(str(preferred)) in sec.create_attempts, (
+        f"联接目录未走 create_private_dir_atomic；实际创建过：{sec.create_attempts}"
+    )
+
+    # 2) 结果上也成立：owner 是当前用户，DACL 无 world 完全控制
+    assert sec.path_owner_sid(preferred) == sec.current_user_sid()
+    _assert_private_acl_shape(_icacls_dump(preferred))
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows path formatting")
 def test_build_cmd_uses_formatted_path_without_quotes(tmp_path: Path) -> None:
     req = ReviewRequest(prompt="x", cd=tmp_path)

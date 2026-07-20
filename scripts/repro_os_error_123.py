@@ -32,11 +32,9 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "src"))
 
-from codex_mcp_cyber.errors import (  # noqa: E402
-    path_has_non_ascii,
-    prefer_codex_workdir,
-)
+from codex_mcp_cyber.paths import path_has_non_ascii  # noqa: E402
 from codex_mcp_cyber.tools.codex import codex_tool  # noqa: E402
+from codex_mcp_cyber.winlink import prefer_codex_workdir  # noqa: E402
 
 
 def _quoted(path: Path) -> str:

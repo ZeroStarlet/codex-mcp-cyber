@@ -32,8 +32,12 @@ class CodexProcessRunner(Protocol):
     """行流 seam：执行命令并产出 ProcessOutcome（含 timeout terminal）。
 
     ``workdir``：子进程工作目录；None 表示继承当前进程目录。
-    它属于 interface 而非某个具体 adapter 的字段 —— 否则调用方得先
+    它属于 interface 而非某个具体 adapter 的构造字段 —— 否则调用方得先
     isinstance 认出具体 adapter 才能传，其余 adapter 会静默收不到。
+
+    0.3.0 起 run_review 无条件传入 workdir=，未声明该参数的自定义 adapter
+    会抛 TypeError。这是有意的响亮失败：静默收不到 cwd 正是本参数要消灭的
+    故障模式（见 CHANGELOG.md）。
     """
 
     def run(
