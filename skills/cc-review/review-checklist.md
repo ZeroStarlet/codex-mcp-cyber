@@ -16,7 +16,7 @@ git diff --no-color
 
 把 diff 与「改动文件 / 改动目的 / 本次重点」嵌入 PROMPT。`cd` 传裸路径，不要字面引号。
 
-Windows：中文路径下 Codex 内部工具曾触发 `os error 123`——MCP 包装层会尝试 ASCII 目录联接；调用方仍应避免给 `cd` 加引号。
+Windows：`os error 123` 的元凶是给 `cd` 包了**字面引号**——传裸路径即可；中文 / 非 ASCII 路径同样直接传裸路径，无需特殊处理。
 
 ## 标准 PROMPT 模板
 

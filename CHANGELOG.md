@@ -1,5 +1,38 @@
 # 变更记录
 
+## 0.5.0
+
+### 移除：ASCII 目录联接层（winlink / winsec）
+
+**结论先行**：os error 123 的元凶是 `cd` 带**字面引号**（早已由
+normalize_workdir 修复，见 59bf80e）。「中文路径下 Codex 内部工具必然 123」
+未能在当前环境复现——2026-07-20 直通实验：`codex exec --cd
+C:\Users\Starlet\Desktop\审查\codex-mcp-cyber`（裸中文路径、目录无 8.3 别名、
+不经联接），rg 与文件读取全部 exit 0，回合正常完成。据此移除整个联接防御层：
+
+- 删除 `winlink.py` / `winsec.py` / `tests/winsec_fake.py` 及全部联接 / ACL
+  测试（约 1100 行）；不再在系统盘根创建 `C:\codex-mcp-cyber-v3-<sidhash>`
+  缓存树。
+- `run_review` 把归一后的工作目录**原样**交给 runner（argv `--cd` 与 Popen
+  cwd 同一路径）；报错与领域结局恢复真实路径，不再出现别名。
+- 命名收敛：0.4.0 的 `ReviewResult.real_workdir` → `workdir`（「审核别名」
+  概念随机制一并消亡，CONTEXT.md 词条同步收敛）；`errors.display_error`
+  参数同名调整；invalid_path 文案删除联接指引。
+- 新增回归钉子：裸中文路径归一直通
+  （`test_normalize_non_ascii_workdir_passes_through`）、中文 workdir 原样
+  穿过 runner seam（`test_non_ascii_workdir_reaches_seam_unaliased`）；
+  契约测试改为断言技能文档**不再**引用联接层。
+- 行流 seam 的 `workdir=` 参数与 MCP wire 契约（15 参数 / 返回字典）不变。
+
+**遗留清理**：旧版创建过的 `C:\codex-mcp-cyber-v3-*` 目录可手动删除。
+**兜底**：若个别环境仍遇 123，把仓库放到纯英文路径即可绕过；旧实现见
+0.4.0 git 历史。
+
+### 版本口径
+
+Python 包 0.4.0 → 0.5.0（删除公开模块，破坏性）；`plugin.json` 0.2.1 → 0.2.2
+（技能文档随移除更新）。
+
 ## 0.4.0
 
 ### 破坏性变更（仓库内 API；wire 契约不变）

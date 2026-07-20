@@ -28,7 +28,6 @@ from codex_mcp_cyber.paths import (
     normalize_workdir,
 )
 from codex_mcp_cyber.process import CodexProcessRunner, PopenCodexRunner
-from codex_mcp_cyber.winlink import prefer_codex_workdir
 from codex_mcp_cyber.stream import StreamOutcome, reduce_codex_stream
 
 SleepFn = Callable[[float], Awaitable[None]]
@@ -55,11 +54,7 @@ class ReviewRequest:
 
 @dataclass
 class ReviewResult:
-    """一次审核执行的领域结局（非 wire dict）。
-
-    ``real_workdir``：归一后的真实仓库路径（对外报告用）——不是交给
-    Codex 的审核别名（见 CONTEXT.md「工作目录」词条）。
-    """
+    """一次审核执行的领域结局（非 wire dict）。"""
 
     success: bool
     text: str = ""
@@ -68,7 +63,7 @@ class ReviewResult:
     error_message: str = ""
     error_detail: Optional[Dict[str, Any]] = None
     duration_ms: int = 0
-    real_workdir: Optional[Path] = None
+    workdir: Optional[Path] = None
     metrics: Optional[Dict[str, Any]] = None
     all_messages: Optional[list[dict[str, Any]]] = None
 
@@ -179,7 +174,7 @@ def to_wire(result: ReviewResult) -> Dict[str, Any]:
             "error": display_error(
                 error_kind=result.error_kind,
                 error_message=result.error_message,
-                real_workdir=result.real_workdir,
+                workdir=result.workdir,
             ),
             "error_kind": result.error_kind,
             "error_detail": result.error_detail
@@ -193,13 +188,13 @@ def to_wire(result: ReviewResult) -> Dict[str, Any]:
     return out
 
 
-def build_codex_argv(req: ReviewRequest, codex_workdir: Path) -> list[str]:
+def build_codex_argv(req: ReviewRequest, workdir: Path) -> list[str]:
     """审核请求 → Codex CLI argv（编码侧协议的单一来源）。
 
     初审（会话标识为空）：不追加 resume。
     复审（会话标识非空）：``resume <会话标识>`` 缀在**所有** flag 之后。
     路径一律裸串（list argv 不包引号；format_cli_path 保证 Windows 原生形态）；
-    ``--image`` 相对审核别名解析，不落到 MCP 服务 cwd。
+    ``--image`` 相对工作目录解析，不落到 MCP 服务 cwd。
     argv[0] 是命令名 codex，可执行体绝对路径由生产 adapter 解析改写。
     """
     cmd = [
@@ -208,7 +203,7 @@ def build_codex_argv(req: ReviewRequest, codex_workdir: Path) -> list[str]:
         "--sandbox",
         req.sandbox,
         "--cd",
-        format_cli_path(codex_workdir),
+        format_cli_path(workdir),
         "--json",
     ]
     image_list = (
@@ -221,7 +216,7 @@ def build_codex_argv(req: ReviewRequest, codex_workdir: Path) -> list[str]:
             [
                 "--image",
                 ",".join(
-                    format_cli_path(Path(p), base=codex_workdir) for p in image_list
+                    format_cli_path(Path(p), base=workdir) for p in image_list
                 ),
             ]
         )
@@ -260,9 +255,8 @@ async def run_review(
 
     # 1) 剥引号 / file URI / 严格归一
     # 2) 必须是已存在的目录
-    # 3) 交给 Codex 时优先 ASCII 联接别名（Windows 中文路径防 123）
     try:
-        real_workdir = normalize_workdir(req.cd)
+        workdir = normalize_workdir(req.cd)
     except InvalidWorkdirError as e:
         msg = f"{e}\n（原始输入：{req.cd!r}）"
         return _finish(
@@ -277,9 +271,9 @@ async def run_review(
             retries=0,
         )
 
-    if not real_workdir.is_dir():
+    if not workdir.is_dir():
         msg = (
-            f"工作目录不存在或不是目录：{real_workdir}\n"
+            f"工作目录不存在或不是目录：{workdir}\n"
             f"（原始输入：{req.cd!r}）"
         )
         return _finish(
@@ -290,18 +284,14 @@ async def run_review(
                 error_kind=ErrorKind.INVALID_PATH,
                 error_message=msg,
                 error_detail=build_error_detail(msg),
-                real_workdir=real_workdir,
+                workdir=workdir,
             ),
             retries=0,
         )
 
-    # 审核别名：实际交给 Codex 的工作目录 —— 非 ASCII 时为 ASCII 联接别名，
-    # 否则就是真实仓库路径。领域结局对外报告一律用真实仓库路径。
-    codex_workdir = prefer_codex_workdir(real_workdir)
-    cmd = build_codex_argv(req, codex_workdir)
-    # 子进程 cwd 也设为审核别名，让 Codex 子工具的相对路径解析落在同一处
-    #（ASCII 联接时尤其重要）。经 run(...) 传入 —— 它是 seam 的一部分，
-    # 不是某个具体 adapter 的字段。
+    cmd = build_codex_argv(req, workdir)
+    # 子进程 cwd 也设为工作目录，让 Codex 子工具的相对路径解析落在同一处。
+    # 经 run(...) 传入 —— 它是 seam 的一部分，不是某个具体 adapter 的字段。
     max_retries = max(0, req.max_retries)
     retries = 0
     last: StreamOutcome | None = None
@@ -311,7 +301,7 @@ async def run_review(
             proc = active_runner.run(
                 cmd,
                 prompt=req.prompt,
-                workdir=codex_workdir,
+                workdir=workdir,
                 timeout=req.timeout,
                 max_duration=req.max_duration,
             )
@@ -324,7 +314,7 @@ async def run_review(
                     error_kind=ErrorKind.COMMAND_NOT_FOUND,
                     error_message=str(e),
                     error_detail=build_error_detail(str(e)),
-                    real_workdir=real_workdir,
+                    workdir=workdir,
                 ),
                 retries=retries,
             )
@@ -340,7 +330,7 @@ async def run_review(
                     error_kind=kind,
                     error_message=msg,
                     error_detail=build_error_detail(msg),
-                    real_workdir=real_workdir,
+                    workdir=workdir,
                 ),
                 retries=retries,
             )
@@ -359,7 +349,7 @@ async def run_review(
                     success=True,
                     text=attempt.text,
                     session_id=attempt.session_id,
-                    real_workdir=real_workdir,
+                    workdir=workdir,
                     all_messages=_maybe_messages(req, attempt.all_messages),
                 ),
                 retries=retries,
@@ -402,7 +392,7 @@ async def run_review(
             error_kind=last.error_kind,
             error_message=last.error_message,
             error_detail=detail,
-            real_workdir=real_workdir,
+            workdir=workdir,
             all_messages=_maybe_messages(req, last.all_messages),
         ),
         result_text=last.text,

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Red/green feedback loop for Windows os error 123 on codex MCP.
 
-Two failure shapes observed in production:
+Root cause (fixed): MCP ``cd`` arriving with *literal* surrounding quotes, e.g.
+  '"C:/Users/Starlet/Desktop/sp_web_api"'
+Windows rejects it as an illegal path (WinError 123) — fixed by
+normalize_workdir (strips paired wrapping quotes / file URIs).
 
-1) MCP ``cd`` arrives with *literal* surrounding quotes, e.g.
-     '"C:/Users/Starlet/Desktop/sp_web_api"'
-   Windows rejects as illegal path (WinError 123) — fixed by normalize_workdir.
-
-2) Real Chinese / non-ASCII workdir is legal for --cd, but Codex *internal tools*
-   later hit os error 123 (8.3 short names often disabled). Mitigated by
-   prefer_codex_workdir() ASCII directory junction + Popen cwd.
+History: 0.4.x additionally aliased non-ASCII workdirs through an ASCII
+directory junction, on the theory that Codex internal tools hit 123 on
+Chinese paths. Direct experiments (2026-07-20, bare Chinese --cd, rg + file
+reads all green) showed current Codex CLI handles non-ASCII workdirs fine;
+the junction layer was removed in 0.5.0. Bare paths — including Chinese
+ones — are passed through unchanged.
 
 Usage (from repo root):
   uv run python scripts/repro_os_error_123.py
@@ -35,7 +37,6 @@ sys.path.insert(0, str(_REPO / "src"))
 from codex_mcp_cyber.classify import looks_like_invalid_path_error  # noqa: E402
 from codex_mcp_cyber.paths import path_has_non_ascii  # noqa: E402
 from codex_mcp_cyber.tools.codex import codex_tool  # noqa: E402
-from codex_mcp_cyber.winlink import prefer_codex_workdir  # noqa: E402
 
 
 def _quoted(path: Path) -> str:
@@ -96,11 +97,9 @@ async def main() -> int:
 
     plain = workdir.as_posix()
     quoted = _quoted(workdir)
-    preferred = prefer_codex_workdir(workdir)
 
     print(f"workdir={workdir}")
     print(f"non_ascii={path_has_non_ascii(workdir)}")
-    print(f"preferred_codex_workdir={preferred}")
     print(f"plain_cd={plain!r}")
     print(f"quoted_cd={quoted!r}")
     print("---")

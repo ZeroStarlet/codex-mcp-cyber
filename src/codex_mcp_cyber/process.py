@@ -50,7 +50,7 @@ class PopenCodexRunner:
     超时走 terminal，不 raise CommandTimeoutError。
 
     ``workdir`` 经 ``run(...)`` 传入并设为 Popen 的 cwd，使 Codex 子工具的相对路径
-    解析落在审核目录（Windows 中文路径场景下通常是 ASCII 目录联接）。
+    解析落在审核目录。
     """
 
     GRACEFUL_SHUTDOWN_DELAY = 0.3

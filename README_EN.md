@@ -164,7 +164,7 @@ Common `error_kind` values: `auth_required` · `invalid_path` · `command_not_fo
 Full contract → [`codex-guide.md`](skills/cc-review/codex-guide.md)
 
 > **Windows**  
-> Do not wrap `cd` in literal quotes. For non-ASCII (e.g. Chinese) workdirs, the MCP may create an ASCII directory junction to reduce Codex-internal `os error 123`.
+> Do not wrap `cd` in literal quotes — quoted input is the actual root cause of Windows `os error 123`. Non-ASCII (e.g. Chinese) workdirs need no special handling; pass the bare path.
 
 ---
 

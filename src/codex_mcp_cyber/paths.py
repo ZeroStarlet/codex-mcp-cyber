@@ -1,7 +1,7 @@
 """工作目录归一与 CLI 路径格式化。
 
 把 MCP / agent 传来的路径文本收成一个可信的 Path，或明确拒绝。
-纯文本处理 —— 不碰 ACL、不建目录、不解析联接（那些在 winsec / winlink）。
+纯文本处理 —— 不建目录、不做 IO。
 """
 
 from __future__ import annotations
@@ -168,10 +168,11 @@ def _is_cwd_alias(text: str) -> bool:
 def format_cli_path(path: Path, *, base: Path | None = None) -> str:
     """传给 codex --cd / Popen cwd / --image 的稳定字符串。
 
-    list argv 不加引号。**不要** Path.resolve()——会跟随目录联接抵消 ASCII 别名。
+    list argv 不加引号。**不要** Path.resolve()——不跟随调用方传入的
+    联接/符号链接，避免路径悄悄变成另一个所指。
 
     base：若 path 为相对路径，相对 base 解析（默认 os.getcwd()）。
-    审核场景应传入审核别名（codex_workdir），避免图片落到 MCP 服务 cwd。
+    审核场景应传入工作目录，避免图片落到 MCP 服务 cwd。
     """
     raw = os.path.normpath(str(path))
     if not os.path.isabs(raw):

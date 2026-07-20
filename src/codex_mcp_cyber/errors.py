@@ -2,8 +2,7 @@
 
 只放「错误是什么 + 给人看什么话」——异常类型、ErrorKind 取值、给 wire 用的
 error_detail，以及按种类生成的修复指引（display_error / build_error_detail 的
-suggestion）。「什么算哪种错」在 classify；路径归一在 paths；Windows 安全
-原语在 winsec / winlink；脱敏在 redact。
+suggestion）。「什么算哪种错」在 classify；路径归一在 paths；脱敏在 redact。
 """
 
 from __future__ import annotations
@@ -83,12 +82,12 @@ def display_error(
     *,
     error_kind: Optional[str],
     error_message: str,
-    real_workdir: Optional[Path] = None,
+    workdir: Optional[Path] = None,
 ) -> str:
     """wire 用人类可读错误文案（种类 → 人话的单一归属）。
 
     领域结局只保留 error_message；修复指引在映射为 wire 时才叠加。
-    ``real_workdir``：归一后的真实仓库路径，仅 invalid_path 文案展示用。
+    ``workdir``：归一后的工作目录，仅 invalid_path 文案展示用。
     """
     raw = error_message or ""
     if error_kind == ErrorKind.AUTH_REQUIRED:
@@ -102,16 +101,15 @@ def display_error(
         )
     if error_kind == ErrorKind.INVALID_PATH:
         path_line = (
-            f"已归一化路径：{real_workdir}\n" if real_workdir is not None else ""
+            f"已归一化路径：{workdir}\n" if workdir is not None else ""
         )
         return (
             "工作目录路径非法或 Codex 在访问路径时触发 Windows os error 123。\n"
             f"{path_line}"
             "常见原因：\n"
-            "1) cd 被包了字面引号（应传裸路径：C:/Users/you/project）\n"
-            "2) 中文/非 ASCII 路径下 Codex 内部工具解析失败"
-            "（本工具会尝试建 ASCII 目录联接；若仍失败，请把仓库放到纯英文路径）\n"
-            "3) 路径不存在或含非法尾部空格/点\n"
+            "1) cd 被包了字面引号（应传裸路径：C:/Users/you/project，"
+            "中文路径同样直接传裸路径）\n"
+            "2) 路径不存在或含非法尾部空格/点\n"
             "\n" + raw
         )
     return raw

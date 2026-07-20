@@ -1,9 +1,10 @@
 """wire 契约的文档表述 ↔ 代码单一来源互钉。
 
 codex-guide.md 的读者是 LLM（cc-review 技能按它调用工具），文档就是接口的
-一部分：参数表、error_kind 表、返回键、诊断行数、缓存路径前缀、安装命令
-若与代码漂移，会直接变成调用方行为错误（历史：文档承诺过代码永不发出的
-幽灵种类 `json_decode`）。本文件让漂移在 CI 变红，而不是在终审现场暴露。
+一部分：参数表、error_kind 表、返回键、诊断行数、安装命令、已移除机制的
+残留描述若与代码漂移，会直接变成调用方行为错误（历史：文档承诺过代码永不
+发出的幽灵种类 `json_decode`；0.5.0 移除联接层后活跃文档曾残留旧指引）。
+本文件让漂移在 CI 变红，而不是在终审现场暴露。
 
 互钉方向：期望值一律从代码单一来源**派生**（to_wire 真实输出、
 inspect.signature、is_retryable_error、setup.sh 命令行），不在测试里
@@ -24,7 +25,6 @@ from codex_mcp_cyber.errors import ErrorKind, build_error_detail
 from codex_mcp_cyber.redact import LAST_LINES_LIMIT
 from codex_mcp_cyber.review import ReviewResult, to_wire
 from codex_mcp_cyber.tools.codex import codex_tool
-from codex_mcp_cyber.winlink import CACHE_ROOT_PREFIX
 
 _REPO = Path(__file__).resolve().parents[1]
 _GUIDE = (_REPO / "skills" / "cc-review" / "codex-guide.md").read_text(
@@ -222,9 +222,25 @@ def test_scenarios_retry_rows_match_classifier() -> None:
     assert checked_no_retry and checked_retry, "F 表应同时存在「不重试」与「重试」两行"
 
 
-def test_cache_root_prefix_documented() -> None:
-    """文档里的 ASCII 缓存根路径模板与 winlink 常量同源。"""
-    assert CACHE_ROOT_PREFIX in _GUIDE
+def test_active_docs_do_not_reference_removed_junction_layer() -> None:
+    """0.5.0 移除了 ASCII 目录联接层——**所有**活跃文档不得再描述联接行为。
+
+    扫描整个 skills/cc-review/ 目录 + README* + CONTEXT.md（不只抽查两份），
+    禁的是行为词汇本身（「联接」/「junction」），不只缓存路径字符串——
+    历史叙述只属于 CHANGELOG。枚举数量下限防空过。
+    """
+    forbidden = ("codex-mcp-cyber-v3-", "wd-junctions", "联接", "junction")
+    doc_paths = sorted((_REPO / "skills" / "cc-review").glob("*.md"))
+    doc_paths += [
+        _REPO / "README.md",
+        _REPO / "README_EN.md",
+        _REPO / "CONTEXT.md",
+    ]
+    assert len(doc_paths) >= 10, f"活跃文档枚举异常（仅 {len(doc_paths)} 份，不得空过）"
+    for p in doc_paths:
+        text = p.read_text(encoding="utf-8")
+        for tok in forbidden:
+            assert tok not in text, f"{p.name} 仍引用已移除的联接层：{tok!r}"
 
 
 def test_readme_remote_install_matches_setup_scripts() -> None:

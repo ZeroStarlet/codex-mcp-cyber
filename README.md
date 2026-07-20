@@ -164,7 +164,7 @@ chmod +x setup.sh && ./setup.sh
 完整契约 → [`codex-guide.md`](skills/cc-review/codex-guide.md)
 
 > **Windows**  
-> `cd` 不要包字面引号。中文 / 非 ASCII 路径下，MCP 会尝试建立 ASCII 目录联接，降低 Codex 内部 `os error 123`。
+> `cd` 不要包字面引号——带引号入参正是 Windows `os error 123` 的元凶。中文 / 非 ASCII 路径直接传裸路径即可，无需特殊处理。
 
 ---
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-mcp-cyber"
-version = "0.4.0"
+version = "0.5.0"
 description = "Claude + Codex 代码审查 MCP 服务器"
 readme = "README.md"
 requires-python = ">=3.12"
