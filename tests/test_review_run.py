@@ -7,11 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from codex_mcp_cyber.errors import (
-    CommandNotFoundError,
-    ErrorKind,
-    normalize_workdir,
-)
+from codex_mcp_cyber.errors import CommandNotFoundError, ErrorKind
+from codex_mcp_cyber.paths import normalize_workdir
 from codex_mcp_cyber.process import ProcessOutcome
 
 from runners import ScriptedLinesRunner, SequenceRunner

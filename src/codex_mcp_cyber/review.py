@@ -11,18 +11,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
+from codex_mcp_cyber.classify import classify_spawn_oserror, is_retryable_error
 from codex_mcp_cyber.errors import (
     CommandNotFoundError,
     ErrorKind,
-    InvalidWorkdirError,
     build_error_detail,
+)
+from codex_mcp_cyber.paths import (
+    InvalidWorkdirError,
     format_cli_path,
-    is_retryable_error,
-    looks_like_invalid_path_error,
     normalize_workdir,
-    prefer_codex_workdir,
 )
 from codex_mcp_cyber.process import CodexProcessRunner, PopenCodexRunner
+from codex_mcp_cyber.winlink import prefer_codex_workdir
 from codex_mcp_cyber.stream import finalize_stream_outcome, reduce_codex_stream
 
 SleepFn = Callable[[float], Awaitable[None]]
@@ -419,26 +420,9 @@ async def run_review(
                 retries=retries,
             )
         except OSError as e:
-            # Popen cwd 非法 / WinError 123 / 267 等：收成 invalid_path 或 subprocess_error
-            err_text = str(e)
-            winerr = getattr(e, "winerror", None)
-            errno = getattr(e, "errno", None)
-            # 123 = ERROR_INVALID_NAME, 267 = ERROR_DIRECTORY, 3 = ERROR_PATH_NOT_FOUND
-            # 2 = ERROR_FILE_NOT_FOUND（cwd 丢失时也可能）
-            pathish = winerr in (2, 3, 123, 161, 206, 267) or errno in (
-                2,
-                3,
-                123,
-                161,
-                206,
-                267,
-            )
-            kind = (
-                ErrorKind.INVALID_PATH
-                if looks_like_invalid_path_error(err_text) or pathish
-                else ErrorKind.SUBPROCESS_ERROR
-            )
-            msg = f"启动 Codex 进程失败：{err_text}"
+            # Popen 启动失败：种类判定在 classify，不在编排里内联 errno 表
+            kind = classify_spawn_oserror(e)
+            msg = f"启动 Codex 进程失败：{e}"
             return _finish(
                 req,
                 ts_start,

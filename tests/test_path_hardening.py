@@ -7,18 +7,19 @@ from pathlib import Path
 
 import pytest
 
-from codex_mcp_cyber.errors import (
+from codex_mcp_cyber.classify import looks_like_invalid_path_error
+from codex_mcp_cyber.paths import (
     InvalidWorkdirError,
     format_cli_path,
-    looks_like_invalid_path_error,
     normalize_workdir,
     path_has_non_ascii,
-    prefer_codex_workdir,
 )
+from codex_mcp_cyber.winlink import prefer_codex_workdir
 from codex_mcp_cyber.process import PopenCodexRunner, ProcessOutcome
 from codex_mcp_cyber.review import ReviewRequest, _build_cmd, run_review
 
 from runners import ScriptedLinesRunner
+from winsec_fake import FakeWinSecurity
 
 
 def _ok_jsonl_lines(text: str = "OK", thread_id: str = "sess-1") -> list[str]:
@@ -130,15 +131,11 @@ def test_normalize_keeps_ascii_junction_without_following(
     """已有 ASCII junction 作 cd 时不得 resolve 回中文真实路径。"""
     if os.name != "nt":
         pytest.skip("Windows only")
-    from codex_mcp_cyber import errors as err
-
     cache = tmp_path / "ascii-cache"
-    cache.mkdir()
-    monkeypatch.setattr(err, "_junction_cache_root", lambda: cache)
     chinese = tmp_path / "审查项目"
     chinese.mkdir()
     (chinese / "m.txt").write_text("ok", encoding="utf-8")
-    alias = err.prefer_codex_workdir(chinese)
+    alias = prefer_codex_workdir(chinese, cache_base=cache)
     assert path_has_non_ascii(alias) is False
     # 关键：normalize 不得跟随 reparse
     normalized = normalize_workdir(str(alias))
@@ -189,25 +186,20 @@ def test_prefer_codex_workdir_ascii_junction_for_non_ascii(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cache = tmp_path / "ascii-cache"
-    cache.mkdir()
-    monkeypatch.setattr(
-        "codex_mcp_cyber.errors._junction_cache_root",
-        lambda: cache,
-    )
 
     chinese = tmp_path / "审查项目"
     chinese.mkdir()
     marker = chinese / "marker.txt"
     marker.write_text("ok", encoding="utf-8")
 
-    preferred = prefer_codex_workdir(chinese)
+    preferred = prefer_codex_workdir(chinese, cache_base=cache)
     assert preferred.exists()
     assert path_has_non_ascii(preferred) is False
     cli = format_cli_path(preferred)
     assert path_has_non_ascii(cli) is False
     assert str(cache) in cli or cache.name in cli.replace("\\", "/")
     assert (preferred / "marker.txt").read_text(encoding="utf-8") == "ok"
-    again = prefer_codex_workdir(chinese)
+    again = prefer_codex_workdir(chinese, cache_base=cache)
     assert again == preferred
 
 
@@ -385,26 +377,26 @@ def test_path_chain_has_reparse_walks_up_to_ancestor(
     只在祖先上打标，叶子与中间层都不是 reparse —— 断言真的走了整条链，
     而不是仅仅证明「A 调用了 B」。
     """
-    from codex_mcp_cyber import errors as err
+    # 被测单元是 WinApiSecurity 自身：链式走查由它的两个内部原语组合而成，
+    # 所以在 winsec 模块内替换叶子谓词是「测 adapter 的组合」，不是穿模块。
+    from codex_mcp_cyber import winsec
 
     ancestor = tmp_path / "reparse-ancestor"
     # 叶子与中间层都不存在：走链必须靠 lstat 而非 exists()
     leaf = ancestor / "mid" / "leaf"
-    monkeypatch.setattr(err, "_is_reparse_point", lambda p: p == ancestor)
+    monkeypatch.setattr(winsec, "_is_reparse_point", lambda p: p == ancestor)
 
-    assert err._path_chain_has_reparse(leaf) is True
+    assert winsec._path_chain_has_reparse(leaf) is True
     # 负例：同级另一棵树上无 reparse，必须为 False（否则上面的 True 无意义）
-    assert err._path_chain_has_reparse(tmp_path / "clean" / "leaf") is False
+    assert winsec._path_chain_has_reparse(tmp_path / "clean" / "leaf") is False
 
 
-def test_missing_path_is_not_reparse() -> None:
-    from codex_mcp_cyber import errors as err
-    from pathlib import Path as P
+def test_missing_path_is_not_reparse(tmp_path: Path) -> None:
+    """缺失路径不是 reparse point —— FileNotFoundError 分支必须返回 False。"""
+    from codex_mcp_cyber.winsec import WinApiSecurity
 
-    missing = P("C:/codex-mcp-cyber-wd/__definitely_missing_xyz__")
-    assert err._is_reparse_point(missing) is False
-    # 父链含盘符根，缺失叶子不该因 FileNotFound 整链判死
-    # 只测叶子本身
+    missing = tmp_path / "__definitely_missing_xyz__"
+    assert WinApiSecurity().is_reparse_point(missing) is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")
@@ -412,14 +404,12 @@ def test_junction_points_to_and_recreate_wrong_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """同一 link 路径若指向错误目标，应替换为正确目标。"""
-    from codex_mcp_cyber import errors as err
+    from codex_mcp_cyber import winlink
 
     cache = tmp_path / "ascii-cache"
-    cache.mkdir()
-    monkeypatch.setattr(err, "_junction_cache_root", lambda: cache)
-    # 固定 digest，强制同一 link 路径
+    # 固定 digest，强制两个不同目标落在同一 link 路径上
     monkeypatch.setattr(
-        err.hashlib,
+        winlink.hashlib,
         "sha1",
         lambda data: type(
             "H",
@@ -435,14 +425,14 @@ def test_junction_points_to_and_recreate_wrong_target(
     (a / "a.txt").write_text("a", encoding="utf-8")
     (b / "b.txt").write_text("b", encoding="utf-8")
 
-    pa = err.prefer_codex_workdir(a)
+    pa = prefer_codex_workdir(a, cache_base=cache)
     assert (pa / "a.txt").read_text(encoding="utf-8") == "a"
     # 同一 digest → 同一 link 路径，应重绑到 b
-    pb = err.prefer_codex_workdir(b)
+    pb = prefer_codex_workdir(b, cache_base=cache)
     assert pa == pb
     assert (pb / "b.txt").read_text(encoding="utf-8") == "b"
     assert not (pb / "a.txt").exists()
-    assert err._junction_points_to(pb, b)
+    assert winlink._junction_points_to(pb, b)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="drive-relative is Windows semantics")
@@ -453,7 +443,7 @@ def test_normalize_rejects_drive_relative() -> None:
 
 
 def test_is_drive_relative() -> None:
-    from codex_mcp_cyber.errors import _is_drive_relative
+    from codex_mcp_cyber.paths import _is_drive_relative
 
     assert _is_drive_relative("C:")
     assert _is_drive_relative("C:.")
@@ -507,31 +497,18 @@ def _icacls_dump(path: Path) -> str:
 
 
 def _assert_private_acl_shape(out: str) -> None:
-    # SYSTEM / Administrators present
+    """icacls 输出必须符合私有目录形状：SYSTEM/Admins 在，Everyone 无完全控制。"""
     assert "NT AUTHORITY\\SYSTEM" in out or "SYSTEM" in out
     assert "BUILTIN\\Administrators" in out or "Administrators" in out
-    # No Everyone / world SID full control in any inheritance form
-    low = out.lower().replace(" ", "")
-    # 匹配 Everyone 或 S-1-1-0 后接任意括号标记再以 (F) 结尾的 ACE
-    import re
 
-    everyone_full = re.compile(
-        r"(?:everyone|s-1-1-0):\([^\n]*\(f\)\)|(?:everyone|s-1-1-0):\([^\n]*f\)",
-        re.IGNORECASE,
-    )
-    # 更直接：行内含 Everyone/S-1-1-0 且含 (F)
+    # 任何以 Everyone / S-1-1-0（world SID）为主体且带 (F) 完全控制的 ACE 都不允许，
+    # 无论继承标记（I）(OI)(CI) 如何组合。典型形态：everyone:(i)(oi)(ci)(f)
     for line in out.splitlines():
-        ll = line.lower()
-        if "everyone" in ll or "s-1-1-0" in ll:
-            # 去掉空格后看是否含 (f) 作为权限标志
-            compact = ll.replace(" ", "")
-            # 典型: everyone:(i)(oi)(ci)(f) 或 everyone:(f)
-            if re.search(r"\([^)]*f\)", compact):
-                # 若仅 RX 等不含单独 F 权限字母则放行；Full 控制标记为 (F)
-                if "(f)" in compact or compact.endswith("f)"):
-                    # 排除误伤：不含 (rx)/(r)/(w) 单独？Full 就是 (F)
-                    # 只要 ACE 主体是 everyone/world 且含 (f) 即失败
-                    raise AssertionError(f"unexpected world full ACE: {line!r}")
+        compact = line.lower().replace(" ", "")
+        if "everyone" not in compact and "s-1-1-0" not in compact:
+            continue
+        if "(f)" in compact:
+            raise AssertionError(f"unexpected world full ACE: {line!r}")
 
 
 def _grant_everyone_full(path: Path) -> None:
@@ -557,18 +534,17 @@ def _grant_everyone_full(path: Path) -> None:
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL APIs")
 def test_restrict_private_acl_protected_dacl_and_owner(tmp_path: Path) -> None:
     """收敛后：owner=me；父目录宽松 ACE 不得继承到子目录。"""
-    from codex_mcp_cyber import errors as err
-    import subprocess
+    from codex_mcp_cyber.winsec import WinApiSecurity
 
+    sec = WinApiSecurity()
     parent = tmp_path / "loose-parent"
     parent.mkdir()
     # 父目录预置 Everyone:F，用于证明子目录收敛后无继承宽权限
     _grant_everyone_full(parent)
     d = parent / "priv"
     d.mkdir()
-    assert err._restrict_private_dir_acl(d) is True
-    sid = err._current_user_sid()
-    assert err._path_owner_sid(d) == sid
+    assert sec.restrict_private_dir_acl(d) is True
+    assert sec.path_owner_sid(d) == sec.current_user_sid()
     out = _icacls_dump(d)
     _assert_private_acl_shape(out)
 
@@ -578,18 +554,19 @@ def test_junction_reuse_fails_closed_when_sid_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """已有 link 且 SID 不可用时必须拒绝复用（不得 target-only）。"""
-    from codex_mcp_cyber import errors as err
+    from codex_mcp_cyber.winsec import WinApiSecurity
 
     cache = tmp_path / "ascii-cache"
-    cache.mkdir()
     chinese = tmp_path / "审查项目"
     chinese.mkdir()
     (chinese / "m.txt").write_text("ok", encoding="utf-8")
-    monkeypatch.setattr(err, "_junction_cache_root", lambda: cache)
-    alias = err.prefer_codex_workdir(chinese)
+
+    alias = prefer_codex_workdir(chinese, sec=WinApiSecurity(), cache_base=cache)
     assert path_has_non_ascii(alias) is False
-    monkeypatch.setattr(err, "_current_user_sid", lambda: None)
-    fallback = err.prefer_codex_workdir(chinese)
+
+    # SID 取不到 → 不得复用已存在的别名，必须回退真实路径
+    blind = FakeWinSecurity(sid=None)
+    fallback = prefer_codex_workdir(chinese, sec=blind, cache_base=cache)
     # 精确：回到原中文目录，且不是 alias
     assert fallback != alias
     assert fallback.resolve() == chinese.resolve()
@@ -597,15 +574,16 @@ def test_junction_reuse_fails_closed_when_sid_missing(
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")
 def test_create_private_dir_atomic_acl_not_everyone_full(tmp_path: Path) -> None:
-    from codex_mcp_cyber import errors as err
+    from codex_mcp_cyber.winsec import WinApiSecurity
 
+    sec = WinApiSecurity()
     # 父目录先给 Everyone:F，证明原子创建不会继承宽权限
     parent = tmp_path / "loose"
     parent.mkdir()
     _grant_everyone_full(parent)
     d = parent / "atom2"
-    err._create_private_dir_atomic(d)
-    assert err._path_owner_sid(d) == err._current_user_sid()
+    sec.create_private_dir_atomic(d)
+    assert sec.path_owner_sid(d) == sec.current_user_sid()
     out = _icacls_dump(d)
     _assert_private_acl_shape(out)
     assert "SYSTEM" in out or "NT AUTHORITY\\SYSTEM" in out
@@ -619,93 +597,81 @@ def test_normalize_tilde_without_home_is_invalid(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.skipif(os.name != "nt", reason="icacls is Windows-only")
 def test_restrict_acl_rejects_foreign_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from codex_mcp_cyber import errors as err
+    from codex_mcp_cyber import winsec
 
-    monkeypatch.setattr(err, "_current_user_sid", lambda: "S-1-5-21-me")
-    monkeypatch.setattr(err, "_path_owner_sid", lambda p: "S-1-5-21-attacker")
-    monkeypatch.setattr(err.os.path, "lexists", lambda p: True)
-    assert err._restrict_private_dir_acl(Path("C:/preowned")) is False
+    # 被测单元是 adapter 自身的 owner 闸门：owner != me 时必须 fail-closed
+    monkeypatch.setattr(winsec, "_current_user_sid", lambda: "S-1-5-21-me")
+    monkeypatch.setattr(winsec, "_path_owner_sid", lambda p: "S-1-5-21-attacker")
+    monkeypatch.setattr(winsec.os.path, "lexists", lambda p: True)
+    assert winsec._restrict_private_dir_acl(Path("C:/preowned")) is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")
 def test_junction_cache_root_rejects_reparse_before_acl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """生产 _junction_cache_root：wd-junctions 已是 reparse 时，不得对其做 private ACL。"""
-    from codex_mcp_cyber import errors as err
+    """wd-junctions 已是 reparse 时，不得对其做 private ACL。
 
-    sid = "S-1-5-21-test-sid-for-reparse-order"
+    顺序很重要：先验 reparse 再动 ACL。反过来就等于对一个可能指向别处的
+    reparse point 改权限。
+    """
+    from codex_mcp_cyber.winlink import _junction_cache_root
+
     user_root = tmp_path / "codex-mcp-cyber-user"
     user_root.mkdir()
     root = user_root / "wd-junctions"
     root.mkdir()
 
-    acl_calls: list[str] = []
-
-    def track_acl(p: Path) -> bool:
-        acl_calls.append(os.path.normcase(str(Path(p).resolve())))
-        return True
-
-    monkeypatch.setattr(err, "_current_user_sid", lambda: sid)
-    monkeypatch.setattr(err, "_JUNCTION_BASE_OVERRIDE", user_root)
-    monkeypatch.setattr(err, "_restrict_private_dir_acl", track_acl)
-    monkeypatch.setattr(
-        err,
-        "_is_reparse_point",
-        lambda p: os.path.normcase(str(Path(p).resolve()))
-        == os.path.normcase(str(root.resolve())),
+    sec = FakeWinSecurity(
+        sid="S-1-5-21-test-sid-for-reparse-order",
+        reparse={str(root)},
     )
-    monkeypatch.delenv("TEMP", raising=False)
-    monkeypatch.delenv("TMP", raising=False)
 
     with pytest.raises(OSError):
-        err._junction_cache_root()
+        _junction_cache_root(sec=sec, cache_base=user_root)
 
-    root_key = os.path.normcase(str(root.resolve()))
-    assert root_key not in acl_calls
+    assert str(root) not in sec.acl_calls
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")
 def test_junction_cache_root_shape_no_temp_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """生产候选只能是系统盘根下的 codex-mcp-cyber-<sidhash>。"""
-    from codex_mcp_cyber import errors as err
+    """生产候选只能是系统盘根下的 codex-mcp-cyber-v3-<sidhash>。
+
+    TEMP / TMP 是用户可写的，绝不能成为回退候选 —— 那等于把缓存根交给
+    攻击者可控的路径。
+    """
+    from codex_mcp_cyber.winlink import _junction_cache_root
     import hashlib
 
     sid = "S-1-5-21-shape-test"
     uh = hashlib.sha1(sid.encode()).hexdigest()[:12]
-    seen: list[Path] = []
 
-    real_exists = err.os.path.lexists
-
-    def fake_lexists(p):  # noqa: ANN001
-        seen.append(Path(p))
-        return False  # force create path then fail early on parent reparse or mkdir
-
-    monkeypatch.setattr(err, "_current_user_sid", lambda: sid)
-    monkeypatch.setattr(err, "_windows_directory", lambda: r"C:\Windows")
-    monkeypatch.setattr(err, "_JUNCTION_BASE_OVERRIDE", None)
-    monkeypatch.setattr(err.os.path, "lexists", fake_lexists)
-    monkeypatch.setattr(err, "_path_chain_has_reparse", lambda p: True)  # fail all
+    # 让候选被记下后立即创建失败，从而把生产真正选中的缓存根暴露出来
+    sec = FakeWinSecurity(sid=sid, windir=r"C:\Windows", fail_create=True)
     monkeypatch.setenv("TEMP", r"\\evil\share\tmp")
     monkeypatch.setenv("TMP", r"C:\Users\Public\tmp")
 
     with pytest.raises(OSError):
-        err._junction_cache_root()
+        _junction_cache_root(sec=sec, cache_base=None)
 
-    # 所有尝试的路径都必须是 C:\codex-mcp-cyber-<hash> 或其子路径，不得含 evil/Public
-    joined = " ".join(str(p) for p in seen).lower()
+    attempts = [c.lower().replace("/", "\\") for c in sec.create_attempts]
+    assert attempts, "未尝试创建任何候选缓存根"
+
+    expected = rf"c:\codex-mcp-cyber-v3-{uh}"
+    # 每一个被尝试创建的路径都必须落在系统盘根下的 codex-mcp-cyber-v3-<hash> 里
+    for path in attempts:
+        assert path.startswith(expected), f"候选落在预期缓存根之外：{path!r}"
+
+    # TEMP / TMP 用户可写，绝不能成为回退候选
+    joined = " ".join(attempts + [c.lower() for c in sec.chain_calls])
     assert "evil" not in joined
     assert "public" not in joined
-    assert any(
-        str(p).lower().replace("/", "\\").startswith(rf"c:\codex-mcp-cyber-v3-{uh}")
-        for p in seen
-    )
 
 
 def test_looks_like_unc_mixed_separators() -> None:
-    from codex_mcp_cyber.errors import _looks_like_unc
+    from codex_mcp_cyber.paths import _looks_like_unc
 
     assert _looks_like_unc(r"\\server\share")
     assert _looks_like_unc("//server/share")

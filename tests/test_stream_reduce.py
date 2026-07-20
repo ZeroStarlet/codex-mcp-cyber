@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import json
 
-from codex_mcp_cyber.errors import (
-    ErrorKind,
-    build_error_detail,
-    filter_last_lines,
-    redact_tool_result_event,
-)
+from codex_mcp_cyber.errors import ErrorKind, build_error_detail
+from codex_mcp_cyber.redact import filter_last_lines, redact_tool_result_event
 from codex_mcp_cyber.stream import (
     finalize_stream_outcome,
     is_turn_completed_line,
@@ -83,8 +79,6 @@ def test_build_error_detail_last_lines_use_redaction() -> None:
     assert "[truncated]" in detail["last_lines"][0]
 
 def test_is_turn_completed_line_predicate() -> None:
-    from codex_mcp_cyber.stream import is_turn_completed_line
-
     assert is_turn_completed_line(json.dumps({"type": "turn.completed"})) is True
     assert is_turn_completed_line(json.dumps({"type": "turn.started"})) is False
     assert is_turn_completed_line("not-json") is False

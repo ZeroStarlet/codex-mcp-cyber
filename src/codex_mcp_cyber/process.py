@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Optional, Protocol
 
-from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError, format_cli_path
+from codex_mcp_cyber.errors import CommandNotFoundError, CommandTimeoutError
+from codex_mcp_cyber.paths import format_cli_path
 
 Terminal = Literal["completed", "timeout", "idle_timeout"]
 

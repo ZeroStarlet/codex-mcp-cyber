@@ -203,7 +203,6 @@ def test_popen_predicate_timeout_keeps_partial_lines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """P2 回归：谓词抛 CommandTimeoutError 时保留此前已读行。"""
-    from codex_mcp_cyber.errors import CommandTimeoutError
     from codex_mcp_cyber.process import PopenCodexRunner
     import codex_mcp_cyber.process as process_mod
 
